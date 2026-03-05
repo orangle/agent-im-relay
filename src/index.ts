@@ -1,4 +1,5 @@
 import {
+  type AnyThreadChannel,
   Client,
   Events,
   GatewayIntentBits,
@@ -6,9 +7,13 @@ import {
   Routes,
   type ChatInputCommandInteraction,
 } from 'discord.js';
+import { addAssistantMessage, addUserMessage, buildPromptWithHistory, getConversationHistory } from './agent/conversation.js';
+import { streamAgentSession, type AgentStreamEvent } from './agent/session.js';
 import { config } from './config.js';
 import { askCommand, handleAskCommand } from './commands/ask.js';
 import { codeCommand, handleCodeCommand } from './commands/code.js';
+import { streamAgentToDiscord, type StreamTargetChannel } from './discord/stream.js';
+import { ensureMentionThread } from './discord/thread.js';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
 
@@ -20,7 +25,7 @@ const commandHandlers = new Map<string, CommandHandler>([
 const commandDefinitions = [codeCommand, askCommand];
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
 const rest = new REST({ version: '10' }).setToken(config.discordToken);
@@ -45,6 +50,49 @@ async function registerSlashCommands(): Promise<void> {
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function extractMentionPrompt(content: string, botId: string): string {
+  const mentionRegex = new RegExp(`<@!?${botId}>`, 'g');
+  return content.replace(mentionRegex, '').replace(/\s+/g, ' ').trim();
+}
+
+async function* captureAgentEvents(
+  events: AsyncIterable<AgentStreamEvent>,
+  onEvent: (event: AgentStreamEvent) => void,
+): AsyncGenerator<AgentStreamEvent, void> {
+  for await (const event of events) {
+    onEvent(event);
+    yield event;
+  }
+}
+
+async function runMentionConversation(thread: AnyThreadChannel, prompt: string): Promise<void> {
+  const history = getConversationHistory(thread.id);
+  const contextualPrompt = buildPromptWithHistory(history, prompt);
+  addUserMessage(thread.id, prompt);
+
+  let assistantResponse = '';
+  const events = streamAgentSession({
+    mode: 'code',
+    prompt: contextualPrompt,
+    cwd: process.cwd(),
+  });
+
+  await streamAgentToDiscord(
+    { channel: thread as StreamTargetChannel },
+    captureAgentEvents(events, (event) => {
+      if (event.type === 'text') {
+        assistantResponse += event.delta;
+      } else if (event.type === 'done' && !assistantResponse.trim()) {
+        assistantResponse = event.result;
+      }
+    }),
+  );
+
+  if (assistantResponse.trim()) {
+    addAssistantMessage(thread.id, assistantResponse);
+  }
 }
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -79,6 +127,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.followUp({ content: `Unexpected error: ${errorText}`, ephemeral: true });
     } else {
       await interaction.reply({ content: `Unexpected error: ${errorText}`, ephemeral: true });
+    }
+  }
+});
+
+client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot || !message.inGuild()) return;
+
+  const botUser = client.user;
+  if (!botUser || !message.mentions.has(botUser)) return;
+
+  const prompt = extractMentionPrompt(message.content, botUser.id);
+  if (!prompt) {
+    await message.reply('Please include a prompt after mentioning me.');
+    return;
+  }
+
+  const replyTarget = message.channel.isThread() ? message.channel : message;
+
+  try {
+    if (message.channel.isThread()) {
+      await runMentionConversation(message.channel, prompt);
+      return;
+    }
+
+    const thread = await ensureMentionThread(message, prompt);
+    await runMentionConversation(thread, prompt);
+  } catch (error) {
+    const errorText = toErrorMessage(error);
+    if ('send' in replyTarget) {
+      await replyTarget.send(`Failed to process mention: ${errorText}`);
+    } else {
+      await replyTarget.reply(`Failed to process mention: ${errorText}`);
     }
   }
 });
