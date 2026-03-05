@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   type AnyThreadChannel,
   Client,
@@ -7,7 +8,6 @@ import {
   Routes,
   type ChatInputCommandInteraction,
 } from 'discord.js';
-import { addAssistantMessage, addUserMessage, buildPromptWithHistory, getConversationHistory } from './agent/conversation.js';
 import { streamAgentSession, type AgentStreamEvent } from './agent/session.js';
 import { config } from './config.js';
 import { askCommand, handleAskCommand } from './commands/ask.js';
@@ -23,6 +23,7 @@ const commandHandlers = new Map<string, CommandHandler>([
 ]);
 
 const commandDefinitions = [codeCommand, askCommand];
+const threadSessions = new Map<string, string>();
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -68,15 +69,17 @@ async function* captureAgentEvents(
 }
 
 async function runMentionConversation(thread: AnyThreadChannel, prompt: string): Promise<void> {
-  const history = getConversationHistory(thread.id);
-  const contextualPrompt = buildPromptWithHistory(history, prompt);
-  addUserMessage(thread.id, prompt);
-
+  const existingSessionId = threadSessions.get(thread.id);
+  const initialSessionId = existingSessionId ?? randomUUID();
+  let resolvedSessionId = existingSessionId;
   let assistantResponse = '';
   const events = streamAgentSession({
     mode: 'code',
-    prompt: contextualPrompt,
-    cwd: process.cwd(),
+    prompt,
+    cwd: config.claudeCwd,
+    ...(existingSessionId
+      ? { resumeSessionId: existingSessionId }
+      : { sessionId: initialSessionId }),
   });
 
   await streamAgentToDiscord(
@@ -84,14 +87,17 @@ async function runMentionConversation(thread: AnyThreadChannel, prompt: string):
     captureAgentEvents(events, (event) => {
       if (event.type === 'text') {
         assistantResponse += event.delta;
-      } else if (event.type === 'done' && !assistantResponse.trim()) {
-        assistantResponse = event.result;
+      } else if (event.type === 'done') {
+        if (!assistantResponse.trim()) {
+          assistantResponse = event.result;
+        }
+        resolvedSessionId = event.sessionId ?? initialSessionId;
       }
     }),
   );
 
-  if (assistantResponse.trim()) {
-    addAssistantMessage(thread.id, assistantResponse);
+  if (resolvedSessionId) {
+    threadSessions.set(thread.id, resolvedSessionId);
   }
 }
 

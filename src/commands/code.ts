@@ -1,5 +1,6 @@
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import { streamAgentSession } from '../agent/session.js';
+import { config } from '../config.js';
 import { streamAgentToDiscord, type StreamTargetChannel } from '../discord/stream.js';
 import { ensureCodeThread } from '../discord/thread.js';
 
@@ -36,7 +37,7 @@ export async function handleCodeCommand(interaction: ChatInputCommandInteraction
     const events = streamAgentSession({
       mode: 'code',
       prompt,
-      cwd: process.cwd(),
+      cwd: config.claudeCwd,
     });
 
     await streamAgentToDiscord({ channel: thread as StreamTargetChannel }, events);
