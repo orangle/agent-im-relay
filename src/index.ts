@@ -258,10 +258,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (error) {
     const errorText = toErrorMessage(error);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: `Unexpected error: ${errorText}`, ephemeral: true });
-    } else {
-      await interaction.reply({ content: `Unexpected error: ${errorText}`, ephemeral: true });
+    if ('replied' in interaction && 'reply' in interaction) {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: `Unexpected error: ${errorText}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Unexpected error: ${errorText}`, ephemeral: true });
+      }
     }
   }
 });
