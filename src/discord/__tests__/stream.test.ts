@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { chunkForDiscord, formatToolLine, getToolIcon } from '../stream.js';
+import {
+  chunkForDiscord,
+  convertMarkdownForDiscord,
+  formatToolLine,
+  getToolIcon,
+} from '../stream.js';
 
 describe('chunkForDiscord', () => {
   it('splits text at sensible boundaries', () => {
@@ -31,5 +36,94 @@ describe('getToolIcon', () => {
   it('maps known tools and falls back for unknown tools', () => {
     expect(getToolIcon('Read')).toBe('📖');
     expect(getToolIcon('UnknownTool')).toBe('🔧');
+  });
+});
+
+describe('convertMarkdownForDiscord', () => {
+  it('converts #, ##, and ### headings with blank lines before them', () => {
+    const input = ['Intro', '# Title', 'Body', '## Section', '### Detail'].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toBe([
+      'Intro',
+      '',
+      '**Title**',
+      'Body',
+      '',
+      '**Section**',
+      '',
+      '**Detail**',
+    ].join('\n'));
+  });
+
+  it('converts markdown tables into bullet lists', () => {
+    const input = [
+      '| Name | Role |',
+      '| --- | --- |',
+      '| Alice | Admin |',
+      '| Bob | User |',
+    ].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toBe([
+      '- **Name**: Alice | **Role**: Admin',
+      '- **Name**: Bob | **Role**: User',
+    ].join('\n'));
+  });
+
+  it('removes horizontal rules and leaves a blank line', () => {
+    const input = ['Before', '---', 'After'].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toBe(['Before', '', 'After'].join('\n'));
+  });
+
+  it('preserves fenced code blocks exactly as-is', () => {
+    const input = [
+      '```md',
+      '# Heading',
+      '| Name | Role |',
+      '| --- | --- |',
+      '| Alice | Admin |',
+      '---',
+      '```',
+    ].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toBe(input);
+  });
+
+  it('handles mixed content with headings, rules, tables, and code fences', () => {
+    const input = [
+      'Summary',
+      '## Results',
+      '| Name | Score |',
+      '| --- | --- |',
+      '| Alice | 10 |',
+      '| Bob | 8 |',
+      '---',
+      '```md',
+      '# Keep this',
+      '| Name | Score |',
+      '| --- | --- |',
+      '| Carol | 7 |',
+      '```',
+      '### Next',
+      'Done',
+    ].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toBe([
+      'Summary',
+      '',
+      '**Results**',
+      '- **Name**: Alice | **Score**: 10',
+      '- **Name**: Bob | **Score**: 8',
+      '',
+      '```md',
+      '# Keep this',
+      '| Name | Score |',
+      '| --- | --- |',
+      '| Carol | 7 |',
+      '```',
+      '',
+      '**Next**',
+      'Done',
+    ].join('\n'));
   });
 });

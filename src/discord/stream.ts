@@ -123,6 +123,124 @@ export function chunkForDiscord(text: string, maxLength: number): string[] {
   return chunks;
 }
 
+function isFenceLine(line: string): boolean {
+  return line.trimStart().startsWith('```');
+}
+
+function parseTableCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) {
+    return null;
+  }
+
+  let content = trimmed;
+  if (content.startsWith('|')) {
+    content = content.slice(1);
+  }
+  if (content.endsWith('|')) {
+    content = content.slice(0, -1);
+  }
+
+  const cells = content.split('|').map(cell => cell.trim());
+  return cells.length >= 2 ? cells : null;
+}
+
+function isTableSeparatorLine(line: string, columnCount: number): boolean {
+  const cells = parseTableCells(line);
+  if (!cells || cells.length !== columnCount) {
+    return false;
+  }
+
+  return cells.every(cell => /^:?-{3,}:?$/.test(cell));
+}
+
+function formatTableRow(headers: string[], values: string[]): string {
+  return `- ${headers
+    .map((header, index) => `**${header}**: ${values[index] ?? ''}`)
+    .join(' | ')}`;
+}
+
+export function convertMarkdownForDiscord(text: string): string {
+  const lines = text.split('\n');
+  const output: string[] = [];
+  let index = 0;
+  let inFence = false;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+
+    if (isFenceLine(line)) {
+      output.push(line);
+      inFence = !inFence;
+      index += 1;
+      continue;
+    }
+
+    if (inFence) {
+      output.push(line);
+      index += 1;
+      continue;
+    }
+
+    const headerCells = parseTableCells(line);
+    const separatorLine = lines[index + 1];
+    if (
+      headerCells
+      && separatorLine !== undefined
+      && isTableSeparatorLine(separatorLine, headerCells.length)
+    ) {
+      const tableRows: string[][] = [];
+      let rowIndex = index + 2;
+
+      while (rowIndex < lines.length) {
+        const rowLine = lines[rowIndex] ?? '';
+        if (isFenceLine(rowLine)) {
+          break;
+        }
+
+        const rowCells = parseTableCells(rowLine);
+        if (!rowCells) {
+          break;
+        }
+
+        tableRows.push(rowCells);
+        rowIndex += 1;
+      }
+
+      if (tableRows.length > 0) {
+        for (const row of tableRows) {
+          output.push(formatTableRow(headerCells, row));
+        }
+        index = rowIndex;
+        continue;
+      }
+    }
+
+    const headingMatch = line.match(/^\s{0,3}(#{1,3})\s+(.+?)\s*#*\s*$/);
+    if (headingMatch) {
+      if (output.length > 0 && output[output.length - 1] !== '') {
+        output.push('');
+      }
+      output.push(`**${headingMatch[2] ?? ''}**`);
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*---+\s*$/.test(line)) {
+      if (output.length > 0 && output[output.length - 1] !== '') {
+        output.push('');
+      }
+      index += 1;
+      continue;
+    }
+
+    output.push(line);
+    index += 1;
+  }
+
+  return output.join('\n');
+}
+
 // --- Streaming ---
 
 export async function streamAgentToDiscord(
@@ -143,7 +261,8 @@ export async function streamAgentToDiscord(
 
   const flush = async (): Promise<void> => {
     const body = buffer.trim() || '⏳ Thinking...';
-    const chunks = chunkForDiscord(body, maxLength);
+    const convertedBody = convertMarkdownForDiscord(body);
+    const chunks = chunkForDiscord(convertedBody, maxLength);
 
     if (messages.length === 0) {
       const first = await options.channel.send(chunks[0] ?? '⏳ Thinking...');
