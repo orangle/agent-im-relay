@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -58,8 +58,17 @@ export async function readSkillsFromDirectory(rootDir: string): Promise<SkillInf
     throw error;
   }
 
-  const skills = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+  const skills = await Promise.all(entries.map(async (entry) => {
     const dir = path.join(rootDir, entry.name);
+
+    // Follow symlinks — most skills are symlinked
+    try {
+      const stats = await stat(dir);
+      if (!stats.isDirectory()) return null;
+    } catch {
+      return null;
+    }
+
     const skillFile = path.join(dir, 'SKILL.md');
 
     try {
