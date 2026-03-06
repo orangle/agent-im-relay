@@ -3,13 +3,31 @@ import type { AgentStreamEvent } from '../agent/session.js';
 import { config } from '../config.js';
 
 export type StreamTargetChannel = {
-  send(content: string): Promise<Message<boolean>>;
+  send(content: string | { content: string; embeds?: any[] }): Promise<Message<boolean>>;
 };
 
 type StreamToDiscordOptions = {
   channel: StreamTargetChannel;
   initialMessage?: Message<boolean>;
 };
+
+type EmbedFieldData = {
+  name: string;
+  value: string;
+  inline: boolean;
+};
+
+export type EmbedData = {
+  fields: EmbedFieldData[];
+  color?: number;
+};
+
+type MarkdownConversionResult = {
+  text: string;
+  embeds: EmbedData[];
+};
+
+const ZERO_WIDTH_SPACE = '\u200B';
 
 // --- Tool display formatting ---
 
@@ -154,15 +172,66 @@ function isTableSeparatorLine(line: string, columnCount: number): boolean {
   return cells.every(cell => /^:?-{3,}:?$/.test(cell));
 }
 
-function formatTableRow(headers: string[], values: string[]): string {
-  return `- ${headers
-    .map((header, index) => `**${header}**: ${values[index] ?? ''}`)
-    .join(' | ')}`;
+function normalizeTableCells(cells: string[], columnCount: number): string[] {
+  return Array.from({ length: columnCount }, (_, index) => cells[index] ?? '');
 }
 
-export function convertMarkdownForDiscord(text: string): string {
+function buildTableEmbed(headers: string[], rows: string[][]): EmbedData | null {
+  if (headers.length === 2) {
+    return {
+      fields: [
+        {
+          name: headers[0] || ZERO_WIDTH_SPACE,
+          value: rows.map(row => row[0] || ZERO_WIDTH_SPACE).join('\n') || ZERO_WIDTH_SPACE,
+          inline: true,
+        },
+        {
+          name: ZERO_WIDTH_SPACE,
+          value: ZERO_WIDTH_SPACE,
+          inline: true,
+        },
+        {
+          name: headers[1] || ZERO_WIDTH_SPACE,
+          value: rows.map(row => row[1] || ZERO_WIDTH_SPACE).join('\n') || ZERO_WIDTH_SPACE,
+          inline: true,
+        },
+      ],
+    };
+  }
+
+  if (headers.length === 3) {
+    return {
+      fields: headers.map((header, index) => ({
+        name: header || ZERO_WIDTH_SPACE,
+        value: rows.map(row => row[index] || ZERO_WIDTH_SPACE).join('\n') || ZERO_WIDTH_SPACE,
+        inline: true,
+      })),
+    };
+  }
+
+  return null;
+}
+
+function formatAlignedTableCodeBlock(headers: string[], rows: string[][]): string {
+  const widths = headers.map((header, index) => {
+    const rowWidths = rows.map(row => row[index]?.length ?? 0);
+    return Math.max(header.length, ...rowWidths);
+  });
+
+  const formatRow = (cells: string[]): string =>
+    cells
+      .map((cell, index) => cell.padEnd(widths[index] ?? cell.length))
+      .join(' | ');
+
+  const separator = widths.map(width => '-'.repeat(width)).join(' | ');
+
+  return ['```', formatRow(headers), separator, ...rows.map(formatRow), '```'].join('\n');
+}
+
+export function convertMarkdownForDiscord(text: string): MarkdownConversionResult {
   const lines = text.split('\n');
   const output: string[] = [];
+  const embeds: EmbedData[] = [];
   let index = 0;
   let inFence = false;
 
@@ -203,27 +272,30 @@ export function convertMarkdownForDiscord(text: string): string {
           break;
         }
 
-        tableRows.push(rowCells);
+        tableRows.push(normalizeTableCells(rowCells, headerCells.length));
         rowIndex += 1;
       }
 
       if (tableRows.length > 0) {
-        for (const row of tableRows) {
-          output.push(formatTableRow(headerCells, row));
+        const embed = buildTableEmbed(headerCells, tableRows);
+        if (embed) {
+          embeds.push(embed);
+
+          const nextLine = lines[rowIndex];
+          if (
+            output.length > 0
+            && output[output.length - 1] !== ''
+            && nextLine !== undefined
+            && nextLine.trim() !== ''
+          ) {
+            output.push('');
+          }
+        } else {
+          output.push(formatAlignedTableCodeBlock(headerCells, tableRows));
         }
         index = rowIndex;
         continue;
       }
-    }
-
-    const headingMatch = line.match(/^\s{0,3}(#{1,3})\s+(.+?)\s*#*\s*$/);
-    if (headingMatch) {
-      if (output.length > 0 && output[output.length - 1] !== '') {
-        output.push('');
-      }
-      output.push(`**${headingMatch[2] ?? ''}**`);
-      index += 1;
-      continue;
     }
 
     if (/^\s*---+\s*$/.test(line)) {
@@ -238,7 +310,10 @@ export function convertMarkdownForDiscord(text: string): string {
     index += 1;
   }
 
-  return output.join('\n');
+  return {
+    text: output.join('\n'),
+    embeds,
+  };
 }
 
 // --- Streaming ---
@@ -255,17 +330,26 @@ export async function streamAgentToDiscord(
   let buffer = '';
   let lastFlush = 0;
   let renderedChunks: string[] = [];
+  let renderedEmbedsSignature = '[]';
   let toolCount = 0;
   let isThinking = false;
   const maxLength = Math.max(200, config.discordMessageCharLimit);
 
   const flush = async (): Promise<void> => {
     const body = buffer.trim() || '⏳ Thinking...';
-    const convertedBody = convertMarkdownForDiscord(body);
-    const chunks = chunkForDiscord(convertedBody, maxLength);
+    const converted = convertMarkdownForDiscord(body);
+    const embeds = converted.embeds as any[];
+    const embedsSignature = JSON.stringify(converted.embeds);
+    const displayText = converted.text.trim() ? converted.text : ZERO_WIDTH_SPACE;
+    const chunks = chunkForDiscord(displayText, maxLength);
 
     if (messages.length === 0) {
-      const first = await options.channel.send(chunks[0] ?? '⏳ Thinking...');
+      const firstChunk = chunks[0] ?? ZERO_WIDTH_SPACE;
+      const first = await options.channel.send(
+        embeds.length > 0
+          ? { content: firstChunk, embeds }
+          : firstChunk,
+      );
       messages.push(first);
     }
 
@@ -280,14 +364,21 @@ export async function streamAgentToDiscord(
         continue;
       }
 
-      if (chunk !== previous) {
-        await current.edit(chunk || '…').catch(() => {
+      const shouldEdit = chunk !== previous || (index === 0 && embedsSignature !== renderedEmbedsSignature);
+
+      if (shouldEdit) {
+        const payload = index === 0
+          ? { content: chunk || '…', embeds }
+          : chunk || '…';
+
+        await current.edit(payload).catch(() => {
           // Silently ignore edit failures (rate limits, deleted messages)
         });
       }
     }
 
     renderedChunks = chunks;
+    renderedEmbedsSignature = embedsSignature;
     lastFlush = Date.now();
   };
 

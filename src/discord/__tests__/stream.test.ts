@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   chunkForDiscord,
   convertMarkdownForDiscord,
   formatToolLine,
   getToolIcon,
+  streamAgentToDiscord,
 } from '../stream.js';
 
 describe('chunkForDiscord', () => {
@@ -40,22 +41,16 @@ describe('getToolIcon', () => {
 });
 
 describe('convertMarkdownForDiscord', () => {
-  it('converts #, ##, and ### headings with blank lines before them', () => {
+  it('keeps markdown headings unchanged for Discord native rendering', () => {
     const input = ['Intro', '# Title', 'Body', '## Section', '### Detail'].join('\n');
 
-    expect(convertMarkdownForDiscord(input)).toBe([
-      'Intro',
-      '',
-      '**Title**',
-      'Body',
-      '',
-      '**Section**',
-      '',
-      '**Detail**',
-    ].join('\n'));
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: input,
+      embeds: [],
+    });
   });
 
-  it('converts markdown tables into bullet lists', () => {
+  it('extracts two-column markdown tables into Discord embeds', () => {
     const input = [
       '| Name | Role |',
       '| --- | --- |',
@@ -63,16 +58,70 @@ describe('convertMarkdownForDiscord', () => {
       '| Bob | User |',
     ].join('\n');
 
-    expect(convertMarkdownForDiscord(input)).toBe([
-      '- **Name**: Alice | **Role**: Admin',
-      '- **Name**: Bob | **Role**: User',
-    ].join('\n'));
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: '',
+      embeds: [
+        {
+          fields: [
+            { name: 'Name', value: 'Alice\nBob', inline: true },
+            { name: '\u200B', value: '\u200B', inline: true },
+            { name: 'Role', value: 'Admin\nUser', inline: true },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('extracts three-column markdown tables into Discord embeds', () => {
+    const input = [
+      '| Name | Role | Team |',
+      '| --- | --- | --- |',
+      '| Alice | Admin | Core |',
+      '| Bob | User | Infra |',
+    ].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: '',
+      embeds: [
+        {
+          fields: [
+            { name: 'Name', value: 'Alice\nBob', inline: true },
+            { name: 'Role', value: 'Admin\nUser', inline: true },
+            { name: 'Team', value: 'Core\nInfra', inline: true },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('falls back to an aligned code block for tables wider than three columns', () => {
+    const input = [
+      '| Name | Role | Team | Score |',
+      '| --- | --- | --- | --- |',
+      '| Alice | Admin | Core | 10 |',
+      '| Bob | User | Infra | 8 |',
+    ].join('\n');
+
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: [
+        '```',
+        'Name  | Role  | Team  | Score',
+        '----- | ----- | ----- | -----',
+        'Alice | Admin | Core  | 10   ',
+        'Bob   | User  | Infra | 8    ',
+        '```',
+      ].join('\n'),
+      embeds: [],
+    });
   });
 
   it('removes horizontal rules and leaves a blank line', () => {
     const input = ['Before', '---', 'After'].join('\n');
 
-    expect(convertMarkdownForDiscord(input)).toBe(['Before', '', 'After'].join('\n'));
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: ['Before', '', 'After'].join('\n'),
+      embeds: [],
+    });
   });
 
   it('preserves fenced code blocks exactly as-is', () => {
@@ -86,7 +135,10 @@ describe('convertMarkdownForDiscord', () => {
       '```',
     ].join('\n');
 
-    expect(convertMarkdownForDiscord(input)).toBe(input);
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: input,
+      embeds: [],
+    });
   });
 
   it('handles mixed content with headings, rules, tables, and code fences', () => {
@@ -108,22 +160,70 @@ describe('convertMarkdownForDiscord', () => {
       'Done',
     ].join('\n');
 
-    expect(convertMarkdownForDiscord(input)).toBe([
-      'Summary',
-      '',
-      '**Results**',
-      '- **Name**: Alice | **Score**: 10',
-      '- **Name**: Bob | **Score**: 8',
-      '',
-      '```md',
-      '# Keep this',
-      '| Name | Score |',
-      '| --- | --- |',
-      '| Carol | 7 |',
-      '```',
-      '',
-      '**Next**',
-      'Done',
-    ].join('\n'));
+    expect(convertMarkdownForDiscord(input)).toEqual({
+      text: [
+        'Summary',
+        '## Results',
+        '',
+        '```md',
+        '# Keep this',
+        '| Name | Score |',
+        '| --- | --- |',
+        '| Carol | 7 |',
+        '```',
+        '### Next',
+        'Done',
+      ].join('\n'),
+      embeds: [
+        {
+          fields: [
+            { name: 'Name', value: 'Alice\nBob', inline: true },
+            { name: '\u200B', value: '\u200B', inline: true },
+            { name: 'Score', value: '10\n8', inline: true },
+          ],
+        },
+      ],
+    });
+  });
+});
+
+describe('streamAgentToDiscord', () => {
+  it('sends embeds alongside converted text content', async () => {
+    const edit = vi.fn().mockResolvedValue(undefined);
+    const message = { edit } as any;
+    const send = vi.fn().mockResolvedValue(message);
+
+    async function* events() {
+      yield {
+        type: 'text' as const,
+        delta: [
+          'Intro',
+          '',
+          '| Name | Role |',
+          '| --- | --- |',
+          '| Alice | Admin |',
+          '| Bob | User |',
+        ].join('\n'),
+      };
+      yield { type: 'done' as const };
+    }
+
+    await streamAgentToDiscord(
+      { channel: { send } },
+      events(),
+    );
+
+    expect(send).toHaveBeenCalledWith({
+      content: expect.stringContaining('Intro'),
+      embeds: [
+        {
+          fields: [
+            { name: 'Name', value: 'Alice\nBob', inline: true },
+            { name: '\u200B', value: '\u200B', inline: true },
+            { name: 'Role', value: 'Admin\nUser', inline: true },
+          ],
+        },
+      ],
+    });
   });
 });
