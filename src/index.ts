@@ -124,7 +124,7 @@ async function setReaction(msg: Message, phase: ReactionPhase, currentPhase?: Re
 
 async function runMentionConversation(thread: AnyThreadChannel, prompt: string, triggerMsg?: Message): Promise<void> {
   if (activeThreads.has(thread.id)) {
-    await thread.send('⏳ Already processing a request in this thread. Please wait.');
+    // Don't send a message — just silently ignore to avoid spam
     return;
   }
 
@@ -134,17 +134,24 @@ async function runMentionConversation(thread: AnyThreadChannel, prompt: string, 
 
   try {
     const existingSessionId = threadSessions.get(thread.id);
-    const initialSessionId = existingSessionId ?? randomUUID();
-    let resolvedSessionId = existingSessionId;
+    const isResume = !!existingSessionId;
+    const sessionId = existingSessionId ?? randomUUID();
+
+    // Store session ID immediately so follow-up messages know this thread is active
+    threadSessions.set(thread.id, sessionId);
+
+    console.log(`[session] thread=${thread.id} ${isResume ? 'resume' : 'new'} session=${sessionId}`);
 
     const events = streamAgentSession({
       mode: 'code',
       prompt,
       cwd: config.claudeCwd,
-      ...(existingSessionId
-        ? { resumeSessionId: existingSessionId }
-        : { sessionId: initialSessionId }),
+      ...(isResume
+        ? { resumeSessionId: sessionId }
+        : { sessionId }),
     });
+
+    let resolvedSessionId = sessionId;
 
     await streamAgentToDiscord(
       { channel: thread as StreamTargetChannel },
@@ -154,7 +161,8 @@ async function runMentionConversation(thread: AnyThreadChannel, prompt: string, 
           phase = 'tools';
           if (triggerMsg) void setReaction(triggerMsg, 'tools', prev);
         } else if (event.type === 'done') {
-          resolvedSessionId = event.sessionId ?? initialSessionId;
+          // Claude CLI may return a different session_id than what we passed
+          if (event.sessionId) resolvedSessionId = event.sessionId;
         } else if (event.type === 'error') {
           const prev = phase;
           phase = 'error';
@@ -167,9 +175,8 @@ async function runMentionConversation(thread: AnyThreadChannel, prompt: string, 
       if (triggerMsg) await setReaction(triggerMsg, 'done', phase);
     }
 
-    if (resolvedSessionId) {
-      threadSessions.set(thread.id, resolvedSessionId);
-    }
+    // Update with the resolved session ID from Claude CLI
+    threadSessions.set(thread.id, resolvedSessionId);
   } catch (err) {
     if (triggerMsg) await setReaction(triggerMsg, 'error', phase);
     throw err;
