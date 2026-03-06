@@ -1,5 +1,7 @@
-import 'dotenv/config';
-import { join } from 'node:path';
+import { config as dotenvConfig } from 'dotenv';
+import { join, resolve } from 'node:path';
+
+dotenvConfig({ path: resolve(import.meta.dirname, '../../../.env') });
 
 function numberEnv(key: string, fallback: number): number {
   const raw = process.env[key];
@@ -18,4 +20,6 @@ export const config = {
   claudeModel: process.env['CLAUDE_MODEL'],
   claudeCwd: process.env['CLAUDE_CWD']?.trim() || process.cwd(),
   stateFile: process.env['STATE_FILE']?.trim() || join(process.cwd(), 'data', 'sessions.json'),
+  claudeBin: process.env['CLAUDE_BIN']?.trim() || '/opt/homebrew/bin/claude',
+  codexBin: process.env['CODEX_BIN']?.trim() || '/opt/homebrew/bin/codex',
 };
