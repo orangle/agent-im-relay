@@ -9,6 +9,7 @@ import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
 } from 'discord.js';
+import type { Message } from 'discord.js';
 import { streamAgentSession, type AgentStreamEvent } from './agent/session.js';
 import { config } from './config.js';
 import { askCommand, handleAskCommand } from './commands/ask.js';
@@ -106,13 +107,30 @@ async function* captureAgentEvents(
   }
 }
 
-async function runMentionConversation(thread: AnyThreadChannel, prompt: string): Promise<void> {
+// --- Reaction status indicator ---
+const REACTIONS = { received: '👀', thinking: '🧠', tools: '🔧', done: '✅', error: '❌' } as const;
+type ReactionPhase = keyof typeof REACTIONS;
+
+async function setReaction(msg: Message, phase: ReactionPhase, currentPhase?: ReactionPhase): Promise<void> {
+  try {
+    if (currentPhase && currentPhase !== phase) {
+      await msg.reactions.cache.get(REACTIONS[currentPhase])?.users.remove(msg.client.user!.id).catch(() => {});
+    }
+    await msg.react(REACTIONS[phase]);
+  } catch {
+    // Silently ignore reaction failures
+  }
+}
+
+async function runMentionConversation(thread: AnyThreadChannel, prompt: string, triggerMsg?: Message): Promise<void> {
   if (activeThreads.has(thread.id)) {
     await thread.send('⏳ Already processing a request in this thread. Please wait.');
     return;
   }
 
   activeThreads.add(thread.id);
+  let phase = 'thinking' as ReactionPhase;
+  if (triggerMsg) await setReaction(triggerMsg, 'thinking', 'received');
 
   try {
     const existingSessionId = threadSessions.get(thread.id);
@@ -131,15 +149,30 @@ async function runMentionConversation(thread: AnyThreadChannel, prompt: string):
     await streamAgentToDiscord(
       { channel: thread as StreamTargetChannel },
       captureAgentEvents(events, (event) => {
-        if (event.type === 'done') {
+        if (event.type === 'tool' && phase !== 'tools' && phase !== 'error') {
+          const prev = phase;
+          phase = 'tools';
+          if (triggerMsg) void setReaction(triggerMsg, 'tools', prev);
+        } else if (event.type === 'done') {
           resolvedSessionId = event.sessionId ?? initialSessionId;
+        } else if (event.type === 'error') {
+          const prev = phase;
+          phase = 'error';
+          if (triggerMsg) void setReaction(triggerMsg, 'error', prev);
         }
       }),
     );
 
+    if (phase !== 'error') {
+      if (triggerMsg) await setReaction(triggerMsg, 'done', phase);
+    }
+
     if (resolvedSessionId) {
       threadSessions.set(thread.id, resolvedSessionId);
     }
+  } catch (err) {
+    if (triggerMsg) await setReaction(triggerMsg, 'error', phase);
+    throw err;
   } finally {
     activeThreads.delete(thread.id);
   }
@@ -208,10 +241,13 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
+  // React immediately to acknowledge
+  await message.react(REACTIONS.received).catch(() => {});
+
   try {
     if (message.channel.isThread()) {
       // Already in a thread — continue the session there
-      await runMentionConversation(message.channel, prompt);
+      await runMentionConversation(message.channel, prompt, message);
       return;
     }
 
@@ -219,7 +255,7 @@ client.on(Events.MessageCreate, async (message) => {
     const thread = await ensureMentionThread(message, prompt);
     // Echo the user's prompt in the thread for context
     await thread.send(`**${message.author.displayName}:** ${prompt}`);
-    await runMentionConversation(thread, prompt);
+    await runMentionConversation(thread, prompt, message);
   } catch (error) {
     const errorText = toErrorMessage(error);
     if (message.channel.isThread()) {
