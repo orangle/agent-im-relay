@@ -1,4 +1,5 @@
 import './backends/claude.js';
+import './backends/codex.js';
 import { getBackend, type BackendName } from './backend.js';
 
 export type AgentStreamEvent =
