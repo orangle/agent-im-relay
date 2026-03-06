@@ -1,6 +1,21 @@
 # agent-im-relay
 
+[![GitHub release](https://img.shields.io/github/v/release/Doctor-wu/agent-im-relay)](https://github.com/Doctor-wu/agent-im-relay/releases)
+![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933)
+![pnpm workspace](https://img.shields.io/badge/pnpm-workspace-F69220)
+![TypeScript](https://img.shields.io/badge/language-TypeScript-3178C6)
+![Discord](https://img.shields.io/badge/platform-Discord-5865F2)
+
 A platform-agnostic bridge that connects Claude AI to instant messaging platforms. Built as a pnpm monorepo with a shared core and per-platform adapter packages.
+
+`agent-im-relay` lets you run agent workflows from chat threads while keeping the runtime logic portable across platforms. The shared core owns session state, streaming, interruption, backend integration, and orchestration; platform packages focus on delivery, UX, and command surfaces.
+
+## Highlights
+
+- Shared core runtime for agent sessions, streaming, and interruption
+- Discord adapter with thread-based conversations and slash commands
+- Backend-agnostic control flow that can support multiple agent providers
+- Monorepo structure that makes it easy to add more IM platforms over time
 
 ## Project Structure
 
