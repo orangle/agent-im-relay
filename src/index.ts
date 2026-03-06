@@ -6,6 +6,7 @@ import {
   GatewayIntentBits,
   REST,
   Routes,
+  SlashCommandBuilder,
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import { streamAgentSession, type AgentStreamEvent } from './agent/session.js';
@@ -17,14 +18,51 @@ import { ensureMentionThread } from './discord/thread.js';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
 
+// --- Session store ---
+// Maps threadId → Claude Code session ID for --resume
+const threadSessions = new Map<string, string>();
+
+// Track active (in-progress) threads to prevent concurrent runs
+const activeThreads = new Set<string>();
+
+function endSession(threadId: string): boolean {
+  const had = threadSessions.has(threadId);
+  threadSessions.delete(threadId);
+  activeThreads.delete(threadId);
+  return had;
+}
+
+// --- /done command ---
+const doneCommand = new SlashCommandBuilder()
+  .setName('done')
+  .setDescription('End the current Claude session in this thread')
+  .setDMPermission(false);
+
+async function handleDoneCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const channel = interaction.channel;
+  if (!channel?.isThread()) {
+    await interaction.reply({ content: 'This command only works inside a thread.', ephemeral: true });
+    return;
+  }
+
+  const ended = endSession(channel.id);
+  if (ended) {
+    await interaction.reply('✅ Session ended. Start a new conversation by mentioning me again in a channel.');
+  } else {
+    await interaction.reply({ content: 'No active session in this thread.', ephemeral: true });
+  }
+}
+
+// --- Command registry ---
 const commandHandlers = new Map<string, CommandHandler>([
   ['code', handleCodeCommand],
   ['ask', handleAskCommand],
+  ['done', handleDoneCommand],
 ]);
 
-const commandDefinitions = [codeCommand, askCommand];
-const threadSessions = new Map<string, string>();
+const commandDefinitions = [codeCommand, askCommand, doneCommand];
 
+// --- Client ---
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
@@ -69,37 +107,45 @@ async function* captureAgentEvents(
 }
 
 async function runMentionConversation(thread: AnyThreadChannel, prompt: string): Promise<void> {
-  const existingSessionId = threadSessions.get(thread.id);
-  const initialSessionId = existingSessionId ?? randomUUID();
-  let resolvedSessionId = existingSessionId;
-  let assistantResponse = '';
-  const events = streamAgentSession({
-    mode: 'code',
-    prompt,
-    cwd: config.claudeCwd,
-    ...(existingSessionId
-      ? { resumeSessionId: existingSessionId }
-      : { sessionId: initialSessionId }),
-  });
+  if (activeThreads.has(thread.id)) {
+    await thread.send('⏳ Already processing a request in this thread. Please wait.');
+    return;
+  }
 
-  await streamAgentToDiscord(
-    { channel: thread as StreamTargetChannel },
-    captureAgentEvents(events, (event) => {
-      if (event.type === 'text') {
-        assistantResponse += event.delta;
-      } else if (event.type === 'done') {
-        if (!assistantResponse.trim()) {
-          assistantResponse = event.result;
+  activeThreads.add(thread.id);
+
+  try {
+    const existingSessionId = threadSessions.get(thread.id);
+    const initialSessionId = existingSessionId ?? randomUUID();
+    let resolvedSessionId = existingSessionId;
+
+    const events = streamAgentSession({
+      mode: 'code',
+      prompt,
+      cwd: config.claudeCwd,
+      ...(existingSessionId
+        ? { resumeSessionId: existingSessionId }
+        : { sessionId: initialSessionId }),
+    });
+
+    await streamAgentToDiscord(
+      { channel: thread as StreamTargetChannel },
+      captureAgentEvents(events, (event) => {
+        if (event.type === 'done') {
+          resolvedSessionId = event.sessionId ?? initialSessionId;
         }
-        resolvedSessionId = event.sessionId ?? initialSessionId;
-      }
-    }),
-  );
+      }),
+    );
 
-  if (resolvedSessionId) {
-    threadSessions.set(thread.id, resolvedSessionId);
+    if (resolvedSessionId) {
+      threadSessions.set(thread.id, resolvedSessionId);
+    }
+  } finally {
+    activeThreads.delete(thread.id);
   }
 }
+
+// --- Event handlers ---
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   console.log(`Received ${signal}. Shutting down...`);
@@ -149,22 +195,24 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  const replyTarget = message.channel.isThread() ? message.channel : message;
-
   try {
     if (message.channel.isThread()) {
+      // Already in a thread — continue the session there
       await runMentionConversation(message.channel, prompt);
       return;
     }
 
+    // In a channel — create a new thread (= new session)
     const thread = await ensureMentionThread(message, prompt);
+    // Echo the user's prompt in the thread for context
+    await thread.send(`**${message.author.displayName}:** ${prompt}`);
     await runMentionConversation(thread, prompt);
   } catch (error) {
     const errorText = toErrorMessage(error);
-    if ('send' in replyTarget) {
-      await replyTarget.send(`Failed to process mention: ${errorText}`);
+    if (message.channel.isThread()) {
+      await message.channel.send(`❌ ${errorText}`).catch(() => {});
     } else {
-      await replyTarget.reply(`Failed to process mention: ${errorText}`);
+      await message.reply(`❌ ${errorText}`).catch(() => {});
     }
   }
 });

@@ -50,8 +50,9 @@ export async function ensureCodeThread(
 }
 
 export async function ensureMentionThread(message: Message<true>, prompt: string): Promise<AnyThreadChannel> {
-  if (message.hasThread && message.thread) {
-    return message.thread;
+  // If the message is already in a thread, just use it
+  if (message.channel.isThread()) {
+    return message.channel;
   }
 
   const channel = message.channel;
@@ -59,7 +60,14 @@ export async function ensureMentionThread(message: Message<true>, prompt: string
     throw new Error('This channel type does not support thread creation for mentions.');
   }
 
-  return message.startThread({
+  // Always create a new seed message for the thread to avoid
+  // "A thread has already been created for this message" errors.
+  // This also means each @ mention gets its own thread = its own session.
+  const seedMessage = await channel.send(
+    `🧵 <@${message.author.id}> started a Claude session`,
+  );
+
+  return seedMessage.startThread({
     autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
     name: sanitizeThreadName(prompt),
     reason: `Claude mention started by ${message.author.tag}`,
