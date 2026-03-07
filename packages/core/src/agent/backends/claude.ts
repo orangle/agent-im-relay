@@ -85,34 +85,52 @@ function extractStreamEvent(payload: Record<string, unknown>): AgentStreamEvent[
   return [];
 }
 
+function extractSessionLifecycleEvents(
+  payload: Record<string, unknown>,
+  messageType: string,
+): AgentStreamEvent[] {
+  if (messageType === 'result' || messageType === 'error') {
+    return [];
+  }
+
+  const sessionId = asString(payload.session_id);
+  if (!sessionId) {
+    return [];
+  }
+
+  return [{ type: 'session', sessionId, status: 'confirmed' }];
+}
+
 export function extractEvents(payload: unknown): AgentStreamEvent[] {
   if (!isRecord(payload)) return [];
   const messageType = asString(payload.type);
   if (!messageType) return [];
 
+  const sessionEvents = extractSessionLifecycleEvents(payload, messageType);
+
   if (messageType === 'stream_event') {
-    return extractStreamEvent(payload);
+    return [...sessionEvents, ...extractStreamEvent(payload)];
   }
 
   if (messageType === 'assistant') {
     const deltaEvents = extractDeltaEvents(payload.delta);
     if (deltaEvents.length > 0) {
-      return deltaEvents;
+      return [...sessionEvents, ...deltaEvents];
     }
 
     const message = payload.message;
     if (!isRecord(message)) return [];
-    return extractContentEvents(message.content);
+    return [...sessionEvents, ...extractContentEvents(message.content)];
   }
 
   if (messageType === 'tool_use_summary') {
     const summary = asString(payload.summary);
-    return summary ? [{ type: 'tool', summary }] : [];
+    return summary ? [...sessionEvents, { type: 'tool', summary }] : sessionEvents;
   }
 
   if (messageType === 'system') {
     const status = asString(payload.status) ?? asString(payload.subtype);
-    return status ? [{ type: 'status', status }] : [];
+    return status ? [...sessionEvents, { type: 'status', status }] : sessionEvents;
   }
 
   if (messageType === 'result') {

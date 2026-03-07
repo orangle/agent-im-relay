@@ -137,6 +137,29 @@ describe('extractEvents', () => {
     ]);
     expect(extractEvents({ type: 'error', error: 'boom' })).toEqual([{ type: 'error', error: 'boom' }]);
   });
+
+  it('emits a session lifecycle event when Claude exposes an authoritative session id', () => {
+    expect(extractEvents({
+      type: 'system',
+      status: 'ready',
+      session_id: 'session-live',
+    })).toEqual([
+      { type: 'session', sessionId: 'session-live', status: 'confirmed' },
+      { type: 'status', status: 'ready' },
+    ]);
+
+    const lifecycleEvent: AgentStreamEvent = {
+      type: 'session',
+      sessionId: 'session-live',
+      status: 'confirmed',
+    };
+
+    expect(lifecycleEvent).toEqual({
+      type: 'session',
+      sessionId: 'session-live',
+      status: 'confirmed',
+    });
+  });
 });
 
 describe('streamAgentSession', () => {

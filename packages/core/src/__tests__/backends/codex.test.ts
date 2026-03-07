@@ -86,6 +86,20 @@ describe('codex backend', () => {
 
   it('extracts text and tool events from Codex JSONL items', () => {
     expect(extractCodexEvents({
+      type: 'thread.started',
+      thread_id: 'thread-123',
+    })).toEqual([
+      { type: 'session', sessionId: 'thread-123', status: 'confirmed' },
+    ]);
+
+    expect(extractCodexEvents({
+      type: 'thread.resumed',
+      thread_id: 'thread-456',
+    })).toEqual([
+      { type: 'session', sessionId: 'thread-456', status: 'resumed' },
+    ]);
+
+    expect(extractCodexEvents({
       type: 'item.started',
       item: {
         id: 'item_1',
@@ -145,6 +159,7 @@ describe('codex backend', () => {
       },
     });
     expect(events.slice(1)).toEqual([
+      { type: 'session', sessionId: 'thread-123', status: 'confirmed' },
       { type: 'text', delta: 'Hello world' },
       { type: 'done', result: 'Hello world', sessionId: 'thread-123' },
     ]);

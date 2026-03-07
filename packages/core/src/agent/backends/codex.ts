@@ -66,6 +66,15 @@ export function extractCodexEvents(payload: unknown): AgentStreamEvent[] {
   const type = asString(payload.type);
   if (!type) return [];
 
+  const sessionId = extractCodexSessionId(payload);
+  if (sessionId) {
+    return [{
+      type: 'session',
+      sessionId,
+      status: type === 'thread.resumed' ? 'resumed' : 'confirmed',
+    }];
+  }
+
   if (type === 'item.started') {
     const item = payload.item;
     if (!isRecord(item) || asString(item.type) !== 'command_execution') return [];

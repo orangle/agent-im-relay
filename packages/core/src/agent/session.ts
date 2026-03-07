@@ -5,6 +5,7 @@ import type { AgentMode } from './tools.js';
 
 export type AgentStreamEvent =
   | { type: 'environment'; environment: AgentEnvironment }
+  | { type: 'session'; sessionId: string; status: 'confirmed' | 'resumed' }
   | { type: 'text'; delta: string }
   | { type: 'tool'; summary: string }
   | { type: 'status'; status: string }
