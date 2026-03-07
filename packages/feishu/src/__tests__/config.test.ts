@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createFeishuCallbackHandler,
   createFeishuServer,
   readFeishuConfig,
   startFeishuServer,
@@ -10,6 +11,7 @@ const startedServers: Array<{ stop(): Promise<void> }> = [];
 
 afterEach(async () => {
   await Promise.all(startedServers.splice(0).map(async server => server.stop()));
+  vi.unstubAllEnvs();
 });
 
 describe('readFeishuConfig', () => {
@@ -35,6 +37,34 @@ describe('readFeishuConfig', () => {
       FEISHU_APP_ID: '',
       FEISHU_APP_SECRET: '',
     })).toThrow('Missing required environment variable: FEISHU_APP_ID');
+  });
+
+  it('applies explicit core runtime settings when building a callback handler', () => {
+    vi.stubEnv('STATE_FILE', '/tmp/original-state.json');
+    vi.stubEnv('ARTIFACTS_BASE_DIR', '/tmp/original-artifacts');
+
+    createFeishuCallbackHandler({
+      agentTimeoutMs: 1_000,
+      claudeCwd: '/tmp/feishu-workspace',
+      stateFile: '/tmp/feishu-explicit-state.json',
+      artifactsBaseDir: '/tmp/feishu-explicit-artifacts',
+      artifactRetentionDays: 21,
+      artifactMaxSizeBytes: 123_456,
+      claudeBin: '/tmp/bin/claude',
+      codexBin: '/tmp/bin/codex',
+      feishuAppId: 'test-app-id',
+      feishuAppSecret: 'test-secret',
+      feishuBaseUrl: 'https://open.feishu.cn',
+      feishuPort: 3001,
+    }, {
+      client: {} as never,
+    });
+
+    expect(process.env['STATE_FILE']).toBe('/tmp/feishu-explicit-state.json');
+    expect(process.env['ARTIFACTS_BASE_DIR']).toBe('/tmp/feishu-explicit-artifacts');
+    expect(process.env['CLAUDE_CWD']).toBe('/tmp/feishu-workspace');
+    expect(process.env['CLAUDE_BIN']).toBe('/tmp/bin/claude');
+    expect(process.env['CODEX_BIN']).toBe('/tmp/bin/codex');
   });
 });
 

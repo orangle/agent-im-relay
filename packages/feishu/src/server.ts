@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { initState, persistState } from '@agent-im-relay/core';
 import type { FeishuConfig } from './config.js';
 import { createFeishuClient } from './api.js';
+import { applyFeishuConfigEnvironment } from './config.js';
 import { buildFeishuBackendConfirmationCardPayload } from './cards.js';
 import {
   extractFeishuFileInfo,
@@ -164,6 +165,7 @@ export function createFeishuCallbackHandler(
   headers: Record<string, string | undefined>;
   body?: string;
 }) => Promise<FeishuCallbackResponse> {
+  applyFeishuConfigEnvironment(config);
   const client = dependencies.client ?? createFeishuClient(config);
   const transport = createTransport(client);
   let initialized = false;

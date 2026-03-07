@@ -20,6 +20,19 @@ function numberEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): numbe
   return parsed;
 }
 
+function setOptionalEnv(key: string, value: string | undefined): void {
+  if (value) {
+    process.env[key] = value;
+    return;
+  }
+
+  delete process.env[key];
+}
+
+function setNumericEnv(key: string, value: number): void {
+  process.env[key] = String(value);
+}
+
 export interface CoreConfig {
   agentTimeoutMs: number;
   claudeModel?: string;
@@ -46,6 +59,18 @@ export function readCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
     claudeBin: optionalEnv(env, 'CLAUDE_BIN') || 'claude',
     codexBin: optionalEnv(env, 'CODEX_BIN') || 'codex',
   };
+}
+
+export function applyCoreConfigEnvironment(config: CoreConfig): void {
+  setNumericEnv('AGENT_TIMEOUT_MS', config.agentTimeoutMs);
+  setOptionalEnv('CLAUDE_MODEL', config.claudeModel);
+  process.env['CLAUDE_CWD'] = config.claudeCwd;
+  process.env['STATE_FILE'] = config.stateFile;
+  process.env['ARTIFACTS_BASE_DIR'] = config.artifactsBaseDir;
+  setNumericEnv('ARTIFACT_RETENTION_DAYS', config.artifactRetentionDays);
+  setNumericEnv('ARTIFACT_MAX_SIZE_BYTES', config.artifactMaxSizeBytes);
+  process.env['CLAUDE_BIN'] = config.claudeBin;
+  process.env['CODEX_BIN'] = config.codexBin;
 }
 
 const configProxyHandler: ProxyHandler<CoreConfig> = {
