@@ -15,6 +15,7 @@ import type { AgentBackend, BackendName } from '../agent/backend.js';
 import type { AgentStreamEvent } from '../agent/session.js';
 import {
   confirmThreadSessionBinding,
+  invalidateThreadSessionBinding,
   openThreadSessionBinding,
   resolveThreadResumeMode,
   updateThreadContinuationSnapshot,
@@ -144,8 +145,6 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
       options.backend,
       conversationBackend.get(conversationId) ?? existingBinding?.backend,
     );
-    openThreadSessionBinding({ conversationId, backend: backendName });
-    const resumeMode = resolveThreadResumeMode(conversationId);
     const showEnvironment = !existingBinding;
     const runCwd = conversationCwd.get(conversationId) ?? options.defaultCwd;
     const preparedPrompt = await options.preparePrompt?.({
@@ -153,6 +152,8 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
       prompt: options.prompt,
       sourceMessageId: options.sourceMessageId,
     }) ?? { prompt: options.prompt };
+    openThreadSessionBinding({ conversationId, backend: backendName });
+    const resumeMode = resolveThreadResumeMode(conversationId);
 
     if (resumeMode.type !== 'native-resume') {
       conversationSessions.delete(conversationId);
@@ -181,6 +182,7 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
     let finalResult = '';
     let assistantOutput = '';
     let stopReason: ThreadContinuationStopReason | undefined;
+    let nativeResumeReconfirmed = false;
 
     await options.render(
       { target: options.target, showEnvironment, initialMessage: options.trigger },
@@ -191,11 +193,14 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
           void options.onPhaseChange?.('tools', previousPhase, options.trigger);
         } else if (event.type === 'session') {
           resolvedSessionId = event.sessionId;
-          confirmThreadSessionBinding({
-            conversationId,
-            nativeSessionId: event.sessionId,
-          });
-          await persist();
+          nativeResumeReconfirmed = true;
+          if (threadSessionBindings.has(conversationId)) {
+            confirmThreadSessionBinding({
+              conversationId,
+              nativeSessionId: event.sessionId,
+            });
+            await persist();
+          }
         } else if (event.type === 'text') {
           assistantOutput += event.delta;
         } else if (event.type === 'done') {
@@ -203,15 +208,20 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
           stopReason = 'completed';
           if (event.sessionId) {
             resolvedSessionId = event.sessionId;
-            confirmThreadSessionBinding({
-              conversationId,
-              nativeSessionId: event.sessionId,
-            });
+            if (threadSessionBindings.has(conversationId)) {
+              confirmThreadSessionBinding({
+                conversationId,
+                nativeSessionId: event.sessionId,
+              });
+            }
           }
         } else if (event.type === 'error') {
           const previousPhase = phase;
           phase = 'error';
           stopReason = inferStopReason(event.error);
+          if (resumeMode.type === 'native-resume' && !nativeResumeReconfirmed && threadSessionBindings.has(conversationId)) {
+            invalidateThreadSessionBinding({ conversationId });
+          }
           void options.onPhaseChange?.('error', previousPhase, options.trigger);
         }
 
@@ -231,6 +241,12 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
         }
       }),
     );
+
+    const finalBinding = threadSessionBindings.get(conversationId);
+    if (!finalBinding) {
+      await persist();
+      return true;
+    }
 
     updateThreadContinuationSnapshot({
       conversationId,
@@ -257,8 +273,8 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
       await options.onPhaseChange?.('done', phase, options.trigger);
     }
 
-    if (resumeMode.type === 'native-resume' || resolvedSessionId !== sessionId) {
-      conversationSessions.set(conversationId, resolvedSessionId);
+    if (finalBinding.nativeSessionStatus === 'confirmed' && finalBinding.nativeSessionId) {
+      conversationSessions.set(conversationId, finalBinding.nativeSessionId);
     }
     await persist();
     return true;

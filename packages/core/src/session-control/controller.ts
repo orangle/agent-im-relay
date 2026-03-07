@@ -38,6 +38,7 @@ export function applySessionControlCommand(command: SessionControlCommand): Sess
   }
 
   if (command.type === 'done') {
+    interruptConversationRun(command.conversationId);
     const cleared = closeThreadSession({ conversationId: command.conversationId });
     const clearContinuation = cleared.bindingCleared || cleared.snapshotCleared || cleared.sessionCleared;
     return {
@@ -89,6 +90,7 @@ export function applySessionControlCommand(command: SessionControlCommand): Sess
     const backend = pendingBackend ?? command.value;
     const hadPendingChange = pendingBackendChanges.delete(command.conversationId);
     const backendChanged = conversationBackend.get(command.conversationId) !== backend;
+    interruptConversationRun(command.conversationId);
     const cleared = closeThreadSession({ conversationId: command.conversationId });
     const clearContinuation = cleared.bindingCleared || cleared.snapshotCleared || cleared.sessionCleared;
     conversationBackend.set(command.conversationId, backend);

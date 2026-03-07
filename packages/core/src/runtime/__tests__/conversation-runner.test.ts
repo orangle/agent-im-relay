@@ -14,6 +14,7 @@ vi.mock('../../agent/runtime.js', async () => {
 
 import {
   activeConversations,
+  applySessionControlCommand,
   conversationBackend,
   conversationCwd,
   conversationEffort,
@@ -225,6 +226,120 @@ describe('runConversationWithRenderer', () => {
     expect(callOptions).toEqual(expect.objectContaining({
       prompt: expect.stringContaining('continue with the fix'),
     }));
+  });
+
+  it('does not resurrect sticky state after /done clears a run mid-stream', async () => {
+    runConversationSession.mockImplementation(async function* () {
+      yield {
+        type: 'environment',
+        environment: {
+          backend: 'claude',
+          mode: 'code',
+          model: {},
+          cwd: { value: '/tmp/workspace', source: 'explicit' },
+          git: { isRepo: false },
+        },
+      };
+      yield { type: 'session', sessionId: 'native-session-done', status: 'confirmed' };
+      yield { type: 'done', result: 'done', sessionId: 'native-session-done' };
+    });
+
+    const render = vi.fn(async (_options, events) => {
+      for await (const event of events) {
+        if (event.type === 'session') {
+          applySessionControlCommand({
+            conversationId: 'conv-done-active',
+            type: 'done',
+          });
+        }
+      }
+    });
+
+    await expect(runConversationWithRenderer({
+      conversationId: 'conv-done-active',
+      target: { id: 'channel-done-active' },
+      prompt: 'stop this thread',
+      defaultCwd: '/tmp/workspace',
+      render,
+    })).resolves.toBe(true);
+
+    expect(threadSessionBindings.has('conv-done-active')).toBe(false);
+    expect(threadContinuationSnapshots.has('conv-done-active')).toBe(false);
+    expect(conversationSessions.has('conv-done-active')).toBe(false);
+  });
+
+  it('invalidates stale native resumes and falls back to snapshot continuation next time', async () => {
+    threadSessionBindings.set('conv-native-error', {
+      conversationId: 'conv-native-error',
+      backend: 'claude',
+      nativeSessionId: 'stale-native-session',
+      nativeSessionStatus: 'confirmed',
+      lastSeenAt: '2026-03-07T00:02:00.000Z',
+    });
+    updateThreadContinuationSnapshot({
+      conversationId: 'conv-native-error',
+      taskSummary: 'Continue from the last good thread state.',
+      whyStopped: 'completed',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+    });
+    conversationSessions.set('conv-native-error', 'stale-native-session');
+
+    runConversationSession.mockImplementation(async function* () {
+      yield {
+        type: 'environment',
+        environment: {
+          backend: 'claude',
+          mode: 'code',
+          model: {},
+          cwd: { value: '/tmp/workspace', source: 'explicit' },
+          git: { isRepo: false },
+        },
+      };
+      yield { type: 'error', error: 'Resume session not found' };
+    });
+
+    const render = vi.fn(async (_options, events) => {
+      await drainEvents(events);
+    });
+
+    await expect(runConversationWithRenderer({
+      conversationId: 'conv-native-error',
+      target: { id: 'channel-native-error' },
+      prompt: 'continue',
+      defaultCwd: '/tmp/workspace',
+      render,
+    })).resolves.toBe(true);
+
+    expect(threadSessionBindings.get('conv-native-error')).toEqual(expect.objectContaining({
+      nativeSessionStatus: 'invalid',
+      nativeSessionId: 'stale-native-session',
+    }));
+    expect(conversationSessions.has('conv-native-error')).toBe(false);
+    expect(resolveThreadResumeMode('conv-native-error').type).toBe('snapshot-resume');
+  });
+
+  it('does not leave a sticky binding behind when prompt preparation fails before the run starts', async () => {
+    const render = vi.fn(async (_options, events) => {
+      await drainEvents(events);
+    });
+    const preparePrompt = vi.fn(async () => {
+      throw new Error('Failed to download attachment: spec.md');
+    });
+
+    await expect(runConversationWithRenderer({
+      conversationId: 'conv-prepare-failure',
+      target: { id: 'channel-prepare-failure' },
+      prompt: 'use the attachment',
+      defaultCwd: '/tmp/workspace',
+      preparePrompt,
+      render,
+    })).rejects.toThrow('Failed to download attachment: spec.md');
+
+    expect(runConversationSession).not.toHaveBeenCalled();
+    expect(threadSessionBindings.has('conv-prepare-failure')).toBe(false);
+    expect(threadContinuationSnapshots.has('conv-prepare-failure')).toBe(false);
+    expect(conversationSessions.has('conv-prepare-failure')).toBe(false);
+    expect(activeConversations.has('conv-prepare-failure')).toBe(false);
   });
 
   it('guards against concurrent runs on the same conversation', async () => {

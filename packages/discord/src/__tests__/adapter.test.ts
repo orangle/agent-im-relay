@@ -194,7 +194,7 @@ describe('handleInterruptCommand', () => {
 });
 
 describe('handleDoneCommand', () => {
-  it('keeps done replies unchanged while leaving runtime activity alone', async () => {
+  it('keeps done replies unchanged while requesting the active run to stop', async () => {
     const interaction = createThreadInteraction();
     core.conversationSessions.set('thread-123', 'session-1');
     core.openThreadSessionBinding({
@@ -223,7 +223,6 @@ describe('handleDoneCommand', () => {
     expect(core.threadSessionBindings.has('thread-123')).toBe(false);
     expect(core.threadContinuationSnapshots.has('thread-123')).toBe(false);
     expect(core.activeConversations.has('thread-123')).toBe(true);
-    expect(core.interruptConversationRun).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       '✅ Session ended. Start a new conversation by mentioning me again in a channel.',
     );
