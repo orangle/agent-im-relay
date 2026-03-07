@@ -265,6 +265,13 @@ export async function runFeishuConversation(options: {
     options.target,
     options.mode === 'ask' ? 'Thinking…' : 'Starting run…',
   );
+  await options.transport.sendCard(
+    options.target,
+    buildFeishuSessionControlCardPayload(
+      buildSessionControlCard(options.conversationId),
+      buildFeishuCardContext(options.conversationId, options.target),
+    ),
+  );
 
   const started = await runPlatformConversation({
     conversationId: options.conversationId,
@@ -294,13 +301,6 @@ export async function runFeishuConversation(options: {
   });
 
   if (started) {
-    await options.transport.sendCard(
-      options.target,
-      buildFeishuSessionControlCardPayload(
-        buildSessionControlCard(options.conversationId),
-        buildFeishuCardContext(options.conversationId, options.target),
-      ),
-    );
     return { kind: 'started' };
   }
 
