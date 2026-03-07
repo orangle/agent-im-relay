@@ -5,6 +5,7 @@ import type {
   ClientToGatewayEvent,
   GatewayToClientCommand,
 } from '@agent-im-relay/core';
+import { initState, persistState } from '@agent-im-relay/core';
 import { buildFeishuBackendConfirmationCardPayload } from './cards.js';
 import { buildFeishuCardContext } from './runtime.js';
 import { handleFeishuControlAction, runFeishuConversation, type FeishuRuntimeTransport } from './runtime.js';
@@ -72,6 +73,8 @@ export function createManagedFeishuRelayClient(
     await new Promise(resolve => setTimeout(resolve, ms));
   });
   let stopped = false;
+  let initialized = false;
+  let connected = false;
 
   if (!fetchImpl) {
     throw new Error('Fetch is not available.');
@@ -203,6 +206,7 @@ export function createManagedFeishuRelayClient(
             action: command.payload.action,
             target: command.payload.target,
             transport,
+            persist: persistState,
           });
 
           if (result.kind === 'backend-confirmation') {
@@ -247,11 +251,27 @@ export function createManagedFeishuRelayClient(
 
     async start(): Promise<void> {
       stopped = false;
-      await this.sendHello();
+      if (!initialized) {
+        await initState();
+        initialized = true;
+      }
 
       while (!stopped) {
-        await this.sendHeartbeat();
-        await this.pollOnce();
+        try {
+          if (!connected) {
+            await this.sendHello();
+            connected = true;
+          } else {
+            await this.sendHeartbeat();
+          }
+          await this.pollOnce();
+        } catch (error) {
+          connected = false;
+          console.warn(
+            '[feishu-client] gateway polling failed:',
+            error instanceof Error ? error.message : String(error),
+          );
+        }
         if (!stopped) {
           await sleep(config.feishuClientPollIntervalMs);
         }
