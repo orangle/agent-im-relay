@@ -123,6 +123,22 @@ describe('codex backend', () => {
     ]);
   });
 
+  it('emits a structured invalidation event for authoritative resume failures', () => {
+    expect(extractCodexEvents({
+      type: 'error',
+      error: 'Resume session not found',
+    }, {
+      resumeSessionId: 'thread-123',
+    })).toEqual([
+      {
+        type: 'session-invalidated',
+        sessionId: 'thread-123',
+        reason: 'Resume session not found',
+      },
+      { type: 'error', error: 'Resume session not found' },
+    ]);
+  });
+
   it('emits text events from plain text output', async () => {
     vi.mocked(spawn).mockReturnValue(
       makeProcess([

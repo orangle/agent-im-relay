@@ -101,7 +101,21 @@ function extractSessionLifecycleEvents(
   return [{ type: 'session', sessionId, status: 'confirmed' }];
 }
 
-export function extractEvents(payload: unknown): AgentStreamEvent[] {
+function isAuthoritativeClaudeResumeFailure(error: string): boolean {
+  return [
+    /resume session not found/i,
+    /invalid session/i,
+    /session .*invalid/i,
+    /unknown session/i,
+    /cannot resume/i,
+    /not resumable/i,
+  ].some(pattern => pattern.test(error));
+}
+
+export function extractEvents(
+  payload: unknown,
+  options: { resumeSessionId?: string } = {},
+): AgentStreamEvent[] {
   if (!isRecord(payload)) return [];
   const messageType = asString(payload.type);
   if (!messageType) return [];
@@ -141,7 +155,16 @@ export function extractEvents(payload: unknown): AgentStreamEvent[] {
 
   if (messageType === 'error') {
     const error = asString(payload.error) ?? asString(payload.message) ?? 'Claude CLI request failed';
-    return [{ type: 'error', error }];
+    return isAuthoritativeClaudeResumeFailure(error)
+      ? [
+          {
+            type: 'session-invalidated',
+            sessionId: options.resumeSessionId,
+            reason: error,
+          },
+          { type: 'error', error },
+        ]
+      : [{ type: 'error', error }];
   }
 
   return [];
@@ -245,7 +268,7 @@ async function* streamClaude(options: AgentSessionOptions): AsyncGenerator<Agent
         continue;
       }
 
-      const events = extractEvents(payload);
+      const events = extractEvents(payload, { resumeSessionId: options.resumeSessionId });
       for (const event of events) {
         yield event;
       }

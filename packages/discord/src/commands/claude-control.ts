@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   SlashCommandBuilder,
   type AnyThreadChannel,
@@ -7,17 +6,15 @@ import {
 } from 'discord.js';
 import * as core from '@agent-im-relay/core';
 import {
-  streamAgentSession,
+  runPlatformConversation,
   conversationBackend,
-  type AgentStreamEvent,
   conversationSessions,
   conversationModels,
   conversationEffort,
   conversationCwd,
   activeConversations,
-  processedMessages,
-  pendingConversationCreation,
 } from '@agent-im-relay/core';
+import { config } from '../config.js';
 import { streamAgentToDiscord, type StreamTargetChannel } from '../stream.js';
 
 type CommandHandler = (interaction: ChatInputCommandInteraction) => Promise<void>;
@@ -240,16 +237,6 @@ async function handleCwdCommand(interaction: ChatInputCommandInteraction): Promi
   });
 }
 
-async function* captureSessionEvents(
-  events: AsyncIterable<AgentStreamEvent>,
-  onEvent: (event: AgentStreamEvent) => void,
-): AsyncGenerator<AgentStreamEvent, void> {
-  for await (const event of events) {
-    onEvent(event);
-    yield event;
-  }
-}
-
 async function handleCompactCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   const channel = await requireThread(interaction);
   if (!channel) return;
@@ -260,42 +247,31 @@ async function handleCompactCommand(interaction: ChatInputCommandInteraction): P
   }
 
   await interaction.deferReply();
-  activeConversations.add(channel.id);
 
   try {
     await interaction.editReply(`## /compact\n${compactPrompt}\n\nThinking…`);
     const initialMessage = await interaction.fetchReply();
-
-    const existingSessionId = conversationSessions.get(channel.id);
-    const isResume = !!existingSessionId;
-    const sessionId = existingSessionId ?? randomUUID();
-    conversationSessions.set(channel.id, sessionId);
-
-    let resolvedSessionId = sessionId;
-
-    const events = streamAgentSession({
-      mode: 'code',
+    const started = await runPlatformConversation({
+      conversationId: channel.id,
+      target: channel as AnyThreadChannel & StreamTargetChannel,
       prompt: compactPrompt,
-      model: conversationModels.get(channel.id),
-      effort: conversationEffort.get(channel.id),
-      cwd: conversationCwd.get(channel.id),
-      ...(isResume ? { resumeSessionId: sessionId } : { sessionId }),
+      mode: 'code',
+      backend: conversationBackend.get(channel.id),
+      defaultCwd: config.claudeCwd,
+      persist: core.persistState,
+      render: ({ target, showEnvironment }, events) => streamAgentToDiscord(
+        {
+          channel: target,
+          initialMessage: initialMessage as Message<boolean>,
+          showEnvironment,
+        },
+        events,
+      ),
     });
 
-    await streamAgentToDiscord(
-      {
-        channel: channel as StreamTargetChannel,
-        initialMessage: initialMessage as Message<boolean>,
-      },
-      captureSessionEvents(events, (event) => {
-        if (event.type === 'done' && event.sessionId) {
-          resolvedSessionId = event.sessionId;
-        }
-      }),
-    );
-
-    conversationSessions.set(channel.id, resolvedSessionId);
-    void core.persistState();
+    if (!started) {
+      await interaction.editReply('A Claude run is already active in this thread.');
+    }
   } catch (error) {
     const errorText = toErrorMessage(error);
     if (interaction.replied || interaction.deferred) {
@@ -303,7 +279,5 @@ async function handleCompactCommand(interaction: ChatInputCommandInteraction): P
     } else {
       await interaction.reply({ content: `Failed to run /compact: ${errorText}`, ephemeral: true });
     }
-  } finally {
-    activeConversations.delete(channel.id);
   }
 }

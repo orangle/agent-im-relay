@@ -138,6 +138,22 @@ describe('extractEvents', () => {
     expect(extractEvents({ type: 'error', error: 'boom' })).toEqual([{ type: 'error', error: 'boom' }]);
   });
 
+  it('emits a structured invalidation event for authoritative Claude resume failures', () => {
+    expect(extractEvents({
+      type: 'error',
+      error: 'Invalid session ID for resume',
+    }, {
+      resumeSessionId: 'resume-456',
+    })).toEqual([
+      {
+        type: 'session-invalidated',
+        sessionId: 'resume-456',
+        reason: 'Invalid session ID for resume',
+      },
+      { type: 'error', error: 'Invalid session ID for resume' },
+    ]);
+  });
+
   it('emits a session lifecycle event when Claude exposes an authoritative session id', () => {
     expect(extractEvents({
       type: 'system',

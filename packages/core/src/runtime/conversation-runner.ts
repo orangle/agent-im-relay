@@ -201,6 +201,11 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
             });
             await persist();
           }
+        } else if (event.type === 'session-invalidated') {
+          if (threadSessionBindings.has(conversationId)) {
+            invalidateThreadSessionBinding({ conversationId });
+            await persist();
+          }
         } else if (event.type === 'text') {
           assistantOutput += event.delta;
         } else if (event.type === 'done') {
@@ -219,9 +224,6 @@ export async function runConversationWithRenderer<TTarget, TTrigger = unknown>(
           const previousPhase = phase;
           phase = 'error';
           stopReason = inferStopReason(event.error);
-          if (resumeMode.type === 'native-resume' && !nativeResumeReconfirmed && threadSessionBindings.has(conversationId)) {
-            invalidateThreadSessionBinding({ conversationId });
-          }
           void options.onPhaseChange?.('error', previousPhase, options.trigger);
         }
 

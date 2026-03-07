@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { conversationCwd } from '@agent-im-relay/core';
+import * as core from '@agent-im-relay/core';
+import * as streamModule from '../stream.js';
 import { claudeControlCommandHandlers, claudeControlCommands } from '../commands/claude-control.js';
 
 beforeEach(() => {
-  conversationCwd.clear();
+  core.activeConversations.clear();
+  core.conversationBackend.clear();
+  core.conversationCwd.clear();
+  core.threadSessionBindings.clear();
+  vi.restoreAllMocks();
 });
 
 describe('claudeControlCommands', () => {
@@ -35,7 +40,7 @@ describe('claudeControlCommands', () => {
     } as any;
 
     await handler?.(interaction);
-    expect(conversationCwd.get('thread-123')).toBe('/tmp/project');
+    expect(core.conversationCwd.get('thread-123')).toBe('/tmp/project');
 
     interaction.options.getSubcommand.mockReturnValue('show');
     await handler?.(interaction);
@@ -43,6 +48,56 @@ describe('claudeControlCommands', () => {
 
     interaction.options.getSubcommand.mockReturnValue('clear');
     await handler?.(interaction);
-    expect(conversationCwd.has('thread-123')).toBe(false);
+    expect(core.conversationCwd.has('thread-123')).toBe(false);
+  });
+
+  it('routes /compact through the shared platform runner instead of a direct session path', async () => {
+    const handler = claudeControlCommandHandlers.get('compact');
+    expect(handler).toBeDefined();
+
+    core.conversationBackend.set('thread-compact', 'claude');
+    core.openThreadSessionBinding({
+      conversationId: 'thread-compact',
+      backend: 'claude',
+      now: '2026-03-07T00:00:00.000Z',
+    });
+
+    const runPlatformConversationSpy = vi.spyOn(core, 'runPlatformConversation').mockImplementation(async (options) => {
+      await options.render(
+        {
+          target: options.target,
+          showEnvironment: false,
+        },
+        (async function* () {
+          yield { type: 'done', result: 'compact summary' } as const;
+        })(),
+      );
+      return true;
+    });
+    const streamAgentToDiscordSpy = vi.spyOn(streamModule, 'streamAgentToDiscord').mockResolvedValue(undefined);
+
+    const interaction = {
+      channel: { id: 'thread-compact', isThread: () => true },
+      deferReply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      fetchReply: vi.fn(async () => ({ id: 'reply-1' })),
+      reply: vi.fn(async () => undefined),
+    } as any;
+
+    await handler?.(interaction);
+
+    expect(runPlatformConversationSpy).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: 'thread-compact',
+      prompt: 'Summarize our conversation and current task state briefly.',
+      backend: 'claude',
+    }));
+    expect(streamAgentToDiscordSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: interaction.channel,
+        initialMessage: { id: 'reply-1' },
+        showEnvironment: false,
+      }),
+      expect.any(Object),
+    );
   });
 });

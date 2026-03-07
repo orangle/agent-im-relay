@@ -295,6 +295,11 @@ describe('runConversationWithRenderer', () => {
           git: { isRepo: false },
         },
       };
+      yield {
+        type: 'session-invalidated',
+        sessionId: 'stale-native-session',
+        reason: 'Resume session not found',
+      };
       yield { type: 'error', error: 'Resume session not found' };
     });
 
@@ -316,6 +321,62 @@ describe('runConversationWithRenderer', () => {
     }));
     expect(conversationSessions.has('conv-native-error')).toBe(false);
     expect(resolveThreadResumeMode('conv-native-error').type).toBe('snapshot-resume');
+  });
+
+  it.each([
+    ['Agent request timed out', 'timeout'],
+    ['Agent request aborted', 'interrupted'],
+  ] as const)('keeps confirmed native resume state after a resumed run ends with %s', async (error, whyStopped) => {
+    threadSessionBindings.set('conv-native-transient', {
+      conversationId: 'conv-native-transient',
+      backend: 'claude',
+      nativeSessionId: 'confirmed-native-session',
+      nativeSessionStatus: 'confirmed',
+      lastSeenAt: '2026-03-07T00:02:00.000Z',
+    });
+    updateThreadContinuationSnapshot({
+      conversationId: 'conv-native-transient',
+      taskSummary: 'Resume the existing task from native session state.',
+      whyStopped: 'completed',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+    });
+    conversationSessions.set('conv-native-transient', 'confirmed-native-session');
+
+    runConversationSession.mockImplementation(async function* () {
+      yield {
+        type: 'environment',
+        environment: {
+          backend: 'claude',
+          mode: 'code',
+          model: {},
+          cwd: { value: '/tmp/workspace', source: 'explicit' },
+          git: { isRepo: false },
+        },
+      };
+      yield { type: 'error', error };
+    });
+
+    const render = vi.fn(async (_options, events) => {
+      await drainEvents(events);
+    });
+
+    await expect(runConversationWithRenderer({
+      conversationId: 'conv-native-transient',
+      target: { id: 'channel-native-transient' },
+      prompt: 'keep going',
+      defaultCwd: '/tmp/workspace',
+      render,
+    })).resolves.toBe(true);
+
+    expect(threadSessionBindings.get('conv-native-transient')).toEqual(expect.objectContaining({
+      nativeSessionStatus: 'confirmed',
+      nativeSessionId: 'confirmed-native-session',
+    }));
+    expect(threadContinuationSnapshots.get('conv-native-transient')).toEqual(expect.objectContaining({
+      whyStopped,
+    }));
+    expect(conversationSessions.get('conv-native-transient')).toBe('confirmed-native-session');
+    expect(resolveThreadResumeMode('conv-native-transient').type).toBe('native-resume');
   });
 
   it('does not leave a sticky binding behind when prompt preparation fails before the run starts', async () => {
