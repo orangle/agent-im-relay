@@ -48,4 +48,29 @@ export function readCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
   };
 }
 
-export const config = readCoreConfig();
+const configProxyHandler: ProxyHandler<CoreConfig> = {
+  get(_target, property) {
+    return readCoreConfig()[property as keyof CoreConfig];
+  },
+  has(_target, property) {
+    return property in readCoreConfig();
+  },
+  ownKeys() {
+    return Reflect.ownKeys(readCoreConfig());
+  },
+  getOwnPropertyDescriptor(_target, property) {
+    const current = readCoreConfig();
+    if (!(property in current)) {
+      return undefined;
+    }
+
+    return {
+      configurable: true,
+      enumerable: true,
+      value: current[property as keyof CoreConfig],
+      writable: false,
+    };
+  },
+};
+
+export const config = new Proxy({} as CoreConfig, configProxyHandler);

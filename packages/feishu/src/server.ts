@@ -21,6 +21,7 @@ import {
   buildFeishuCardContext,
   handleFeishuControlAction,
   queuePendingFeishuAttachments,
+  resumePendingFeishuRun,
   resolveFeishuMessageRequest,
   runFeishuConversation,
   type FeishuRuntimeTransport,
@@ -176,6 +177,128 @@ export function createFeishuCallbackHandler(
     initialized = true;
   }
 
+  async function processCallbackPayload(payload: Parameters<typeof normalizeFeishuEvent>[0]): Promise<void> {
+    await ensureInitialized();
+    const event = normalizeFeishuEvent(payload as Parameters<typeof normalizeFeishuEvent>[0]);
+
+    if (event.kind === 'message') {
+      const message = ((payload as { event?: { message?: FeishuMessagePayload } }).event)?.message;
+      if (!message) {
+        return;
+      }
+
+      const conversationId = resolveConversationId(event);
+      if (!conversationId) {
+        return;
+      }
+
+      const target = {
+        chatId: message.chat_id,
+        replyToMessageId: message.message_id,
+      };
+
+      const fileInfo = extractFeishuFileInfo(message);
+      if (fileInfo) {
+        queuePendingFeishuAttachments(
+          conversationId,
+          [await buildManagedAttachment(client, message.message_id, fileInfo)],
+        );
+        await transport.sendText(target, 'File received. Send a prompt to use it.');
+        return;
+      }
+
+      if (!shouldProcessFeishuMessage(message)) {
+        return;
+      }
+
+      const request = resolveFeishuMessageRequest(extractFeishuMessageText(message));
+      if (!request.prompt) {
+        await transport.sendText(target, 'Please include a prompt after mentioning the bot.');
+        return;
+      }
+
+      const result = await runFeishuConversation({
+        conversationId,
+        target,
+        prompt: request.prompt,
+        mode: request.mode,
+        transport,
+        defaultCwd: config.claudeCwd,
+        sourceMessageId: message.message_id,
+      });
+
+      if (result.kind === 'busy') {
+        await transport.sendText(target, 'Conversation is already running.');
+      }
+      return;
+    }
+
+    const action = ((payload as { action?: FeishuActionPayload }).action)?.value;
+    const conversationId = resolveConversationIdFromAction(event);
+    if (!action || !conversationId || typeof action.chatId !== 'string') {
+      return;
+    }
+
+    const target = {
+      chatId: action.chatId,
+      replyToMessageId: typeof action.replyToMessageId === 'string' ? action.replyToMessageId : undefined,
+    };
+    const actionType = action.action;
+    if (typeof actionType !== 'string') {
+      return;
+    }
+
+    const result = await handleFeishuControlAction({
+      action: actionType === 'backend'
+        ? { conversationId, type: 'backend', value: action.value as 'claude' | 'codex' }
+        : actionType === 'confirm-backend'
+          ? { conversationId, type: 'confirm-backend', value: action.value as 'claude' | 'codex' }
+          : actionType === 'cancel-backend'
+            ? { conversationId, type: 'cancel-backend' }
+            : actionType === 'model'
+              ? { conversationId, type: 'model', value: String(action.value) }
+              : actionType === 'effort'
+                ? { conversationId, type: 'effort', value: String(action.value) }
+                : actionType === 'done'
+                  ? { conversationId, type: 'done' }
+                  : { conversationId, type: 'interrupt' },
+      target,
+      transport,
+      persist: persistState,
+    });
+
+    if (result.kind === 'backend-confirmation') {
+      await transport.sendCard(
+        target,
+        buildFeishuBackendConfirmationCardPayload(
+          result.card,
+          buildFeishuCardContext(conversationId, target),
+        ),
+      );
+      return;
+    }
+
+    if (actionType === 'backend' || actionType === 'confirm-backend') {
+      const resumed = await resumePendingFeishuRun({
+        conversationId,
+        transport,
+        defaultCwd: config.claudeCwd,
+        fallback: typeof action.prompt === 'string' && action.prompt.trim()
+          ? {
+            target,
+            prompt: action.prompt.trim(),
+            mode: action.mode === 'ask' ? 'ask' : 'code',
+            sourceMessageId: target.replyToMessageId,
+          }
+          : undefined,
+      });
+
+      if (resumed.kind === 'busy') {
+        await transport.sendText(target, 'Conversation is already running.');
+      }
+    }
+  }
+
   return async ({ method, url, headers, body = '' }) => {
     if (method === 'GET' && url === '/healthz') {
       return text('ok');
@@ -205,104 +328,9 @@ export function createFeishuCallbackHandler(
       headers,
       signingSecret: config.feishuAppSecret,
       runEvent: async (payload) => {
-        await ensureInitialized();
-        const event = normalizeFeishuEvent(payload as Parameters<typeof normalizeFeishuEvent>[0]);
-
-        if (event.kind === 'message') {
-          const message = (payload.event as { message?: FeishuMessagePayload } | undefined)?.message;
-          if (!message) {
-            return;
-          }
-
-          const conversationId = resolveConversationId(event);
-          if (!conversationId) {
-            return;
-          }
-
-          const target = {
-            chatId: message.chat_id,
-            replyToMessageId: message.message_id,
-          };
-
-          const fileInfo = extractFeishuFileInfo(message);
-          if (fileInfo) {
-            queuePendingFeishuAttachments(
-              conversationId,
-              [await buildManagedAttachment(client, message.message_id, fileInfo)],
-            );
-            await transport.sendText(target, 'File received. Send a prompt to use it.');
-            return;
-          }
-
-          if (!shouldProcessFeishuMessage(message)) {
-            return;
-          }
-
-          const request = resolveFeishuMessageRequest(extractFeishuMessageText(message));
-          if (!request.prompt) {
-            await transport.sendText(target, 'Please include a prompt after mentioning the bot.');
-            return;
-          }
-
-          const result = await runFeishuConversation({
-            conversationId,
-            target,
-            prompt: request.prompt,
-            mode: request.mode,
-            transport,
-            defaultCwd: config.claudeCwd,
-            sourceMessageId: message.message_id,
-          });
-
-          if (result.kind === 'busy') {
-            await transport.sendText(target, 'Conversation is already running.');
-          }
-          return;
-        }
-
-        const action = (payload.action as FeishuActionPayload | undefined)?.value;
-        const conversationId = resolveConversationIdFromAction(event);
-        if (!action || !conversationId || typeof action.chatId !== 'string') {
-          return;
-        }
-
-        const target = {
-          chatId: action.chatId,
-          replyToMessageId: typeof action.replyToMessageId === 'string' ? action.replyToMessageId : undefined,
-        };
-        const actionType = action.action;
-        if (typeof actionType !== 'string') {
-          return;
-        }
-
-        const result = await handleFeishuControlAction({
-          action: actionType === 'backend'
-            ? { conversationId, type: 'backend', value: action.value as 'claude' | 'codex' }
-            : actionType === 'confirm-backend'
-              ? { conversationId, type: 'confirm-backend', value: action.value as 'claude' | 'codex' }
-              : actionType === 'cancel-backend'
-                ? { conversationId, type: 'cancel-backend' }
-                : actionType === 'model'
-                  ? { conversationId, type: 'model', value: String(action.value) }
-                  : actionType === 'effort'
-                    ? { conversationId, type: 'effort', value: String(action.value) }
-                    : actionType === 'done'
-                      ? { conversationId, type: 'done' }
-                      : { conversationId, type: 'interrupt' },
-          target,
-          transport,
-          persist: persistState,
+        void processCallbackPayload(payload).catch((error) => {
+          console.error('[feishu] failed to process callback event:', error);
         });
-
-        if (result.kind === 'backend-confirmation') {
-          await transport.sendCard(
-            target,
-            buildFeishuBackendConfirmationCardPayload(
-              result.card,
-              buildFeishuCardContext(conversationId, target),
-            ),
-          );
-        }
       },
     });
 
