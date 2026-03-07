@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { processedEventIds } from '@agent-im-relay/core';
 
 type FeishuHeaders = Record<string, string | undefined>;
+const inFlightEventIds = new Set<string>();
 
 type FeishuCallbackPayload = {
   header: {
@@ -33,7 +34,7 @@ export function validateFeishuSignature(options: {
   const signature = options.headers['x-lark-signature'];
 
   if (!timestamp || !nonce || !signature) {
-    return true;
+    return false;
   }
 
   return signature === createFeishuSignature({
@@ -82,11 +83,16 @@ export async function handleFeishuCallback(options: {
 
   const payload = parseFeishuCallbackPayload(options.body);
   const eventId = payload.header.event_id;
-  if (processedEventIds.has(eventId)) {
+  if (processedEventIds.has(eventId) || inFlightEventIds.has(eventId)) {
     return { kind: 'duplicate', eventId };
   }
 
-  processedEventIds.add(eventId);
-  await options.runEvent(payload);
-  return { kind: 'accepted', eventId };
+  inFlightEventIds.add(eventId);
+  try {
+    await options.runEvent(payload);
+    processedEventIds.add(eventId);
+    return { kind: 'accepted', eventId };
+  } finally {
+    inFlightEventIds.delete(eventId);
+  }
 }
