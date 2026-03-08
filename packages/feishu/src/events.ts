@@ -1,5 +1,10 @@
 import { readFile } from 'node:fs/promises';
-import { initState, persistState } from '@agent-im-relay/core';
+import {
+  initState,
+  persistState,
+  processedEventIds,
+  processedMessages,
+} from '@agent-im-relay/core';
 import { createFeishuClient } from './api.js';
 import type { FeishuConfig } from './config.js';
 import {
@@ -45,6 +50,7 @@ export const FEISHU_CARD_ACTION_EVENT_TYPE = 'card.action.trigger';
 export const FEISHU_MENU_ACTION_EVENT_TYPE = 'application.bot.menu_v6';
 
 export type FeishuMessageReceiveEvent = {
+  event_id?: string;
   sender?: {
     sender_id?: {
       open_id?: string;
@@ -71,6 +77,7 @@ export type FeishuMessageReceiveEvent = {
 };
 
 export type FeishuCardActionTriggerEvent = {
+  event_id?: string;
   open_id?: string;
   user_id?: string;
   open_message_id?: string;
@@ -83,14 +90,188 @@ export type FeishuCardActionTriggerEvent = {
 };
 
 export type FeishuMenuActionTriggerEvent = {
+  event_id?: string;
+  operator?: {
+    operator_id?: {
+      open_id?: string;
+      user_id?: string;
+    };
+  };
   event_key?: string;
   chat_id?: string;
+  timestamp?: number;
 };
 
 type RouterDependencies = {
   client?: FeishuClient;
   readFileImpl?: typeof readFile;
 };
+
+const FEISHU_EVENT_DEDUP_TTL_MS = 5 * 60_000;
+const FEISHU_ACTION_DEDUP_TTL_MS = 5_000;
+
+type ProcessedKeyStore = {
+  processed: Set<string>;
+  timers: Map<string, ReturnType<typeof setTimeout>>;
+};
+
+type DedupEntry = {
+  key?: string;
+  store: ProcessedKeyStore;
+  ttlMs: number;
+};
+
+type DedupClaim = {
+  duplicate: boolean;
+  complete(succeeded: boolean): void;
+};
+
+function maybeUnrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof (timer as { unref?: () => void }).unref === 'function') {
+    (timer as { unref: () => void }).unref();
+  }
+}
+
+function scheduleProcessedKey(
+  store: ProcessedKeyStore,
+  key: string,
+  ttlMs: number,
+): void {
+  const existingTimer = store.timers.get(key);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  store.processed.add(key);
+  const timer = setTimeout(() => {
+    store.processed.delete(key);
+    store.timers.delete(key);
+  }, ttlMs);
+  maybeUnrefTimer(timer);
+  store.timers.set(key, timer);
+}
+
+function createFeishuIngressDeduplicator() {
+  const inFlightKeys = new Set<string>();
+  const processedActionKeys = new Set<string>();
+  const eventTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const messageTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const actionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const eventStore: ProcessedKeyStore = {
+    processed: processedEventIds,
+    timers: eventTimers,
+  };
+  const messageStore: ProcessedKeyStore = {
+    processed: processedMessages,
+    timers: messageTimers,
+  };
+  const actionStore: ProcessedKeyStore = {
+    processed: processedActionKeys,
+    timers: actionTimers,
+  };
+
+  function claim(entries: DedupEntry[]): DedupClaim {
+    const normalizedEntries = entries
+      .filter((entry): entry is DedupEntry & { key: string } => typeof entry.key === 'string' && entry.key.length > 0)
+      .filter((entry, index, allEntries) => allEntries.findIndex((candidate) => candidate.key === entry.key) === index);
+
+    if (normalizedEntries.some((entry) => entry.store.processed.has(entry.key) || inFlightKeys.has(entry.key))) {
+      return {
+        duplicate: true,
+        complete: () => undefined,
+      };
+    }
+
+    for (const entry of normalizedEntries) {
+      inFlightKeys.add(entry.key);
+    }
+
+    return {
+      duplicate: false,
+      complete(succeeded: boolean): void {
+        for (const entry of normalizedEntries) {
+          inFlightKeys.delete(entry.key);
+          if (succeeded) {
+            scheduleProcessedKey(entry.store, entry.key, entry.ttlMs);
+          }
+        }
+      },
+    };
+  }
+
+  function claimMessage(payload: FeishuMessageReceiveEvent): DedupClaim {
+    return claim([
+      {
+        key: typeof payload.event_id === 'string' ? `feishu:event:${payload.event_id}` : undefined,
+        store: eventStore,
+        ttlMs: FEISHU_EVENT_DEDUP_TTL_MS,
+      },
+      {
+        key: typeof payload.message.message_id === 'string'
+          ? `feishu:message:${payload.message.message_id}`
+          : undefined,
+        store: messageStore,
+        ttlMs: FEISHU_EVENT_DEDUP_TTL_MS,
+      },
+    ]);
+  }
+
+  function claimCardAction(payload: FeishuCardActionTriggerEvent): DedupClaim {
+    const actionValue = payload.action?.value;
+    const actionKey = typeof payload.event_id === 'string'
+      ? undefined
+      : JSON.stringify({
+        actorId: payload.open_id ?? payload.user_id,
+        openMessageId: payload.open_message_id,
+        tag: payload.action?.tag,
+        option: payload.action?.option,
+        timezone: payload.action?.timezone,
+        value: actionValue,
+      });
+
+    return claim([
+      {
+        key: typeof payload.event_id === 'string' ? `feishu:event:${payload.event_id}` : undefined,
+        store: eventStore,
+        ttlMs: FEISHU_EVENT_DEDUP_TTL_MS,
+      },
+      {
+        key: actionKey ? `feishu:action:${actionKey}` : undefined,
+        store: actionStore,
+        ttlMs: FEISHU_ACTION_DEDUP_TTL_MS,
+      },
+    ]);
+  }
+
+  function claimMenuAction(payload: FeishuMenuActionTriggerEvent): DedupClaim {
+    const operatorId = payload.operator?.operator_id?.open_id ?? payload.operator?.operator_id?.user_id;
+    const menuKey = typeof payload.event_id === 'string'
+      ? undefined
+      : typeof payload.timestamp === 'number'
+        ? `feishu:menu:${payload.chat_id ?? ''}:${payload.event_key ?? ''}:${operatorId ?? ''}:${payload.timestamp}`
+        : undefined;
+
+    return claim([
+      {
+        key: typeof payload.event_id === 'string' ? `feishu:event:${payload.event_id}` : undefined,
+        store: eventStore,
+        ttlMs: FEISHU_EVENT_DEDUP_TTL_MS,
+      },
+      {
+        key: menuKey,
+        store: eventStore,
+        ttlMs: FEISHU_EVENT_DEDUP_TTL_MS,
+      },
+    ]);
+  }
+
+  return {
+    claimMessage,
+    claimCardAction,
+    claimMenuAction,
+  };
+}
 
 function resolveSenderOpenId(payload: FeishuMessageReceiveEvent): string | undefined {
   return payload.sender?.sender_id?.open_id;
@@ -299,6 +480,7 @@ export function createFeishuEventRouter(
   const client = dependencies.client ?? createFeishuClient(config);
   const readFileImpl = dependencies.readFileImpl ?? readFile;
   const transport = createTransport(client, readFileImpl);
+  const ingressDeduplicator = createFeishuIngressDeduplicator();
   let initialized = false;
 
   async function ensureInitialized(): Promise<void> {
@@ -311,282 +493,341 @@ export function createFeishuEventRouter(
     initialized = true;
   }
 
+  async function persistFeishuState(): Promise<void> {
+    await persistState();
+    try {
+      await persistFeishuSessionChats(config.stateFile);
+    } catch (error) {
+      console.warn('[feishu] failed to persist session chat index:', error);
+    }
+  }
+
   async function handleMessageEvent(payload: FeishuMessageReceiveEvent): Promise<void> {
-    await ensureInitialized();
-    const rawEvent = normalizeFeishuMessageReceiveEvent(payload);
-    const event = normalizeFeishuEvent(rawEvent);
-    const message = rawEvent.event?.message;
-    if (event.kind !== 'message' || !message) {
+    const dedup = ingressDeduplicator.claimMessage(payload);
+    if (dedup.duplicate) {
       return;
     }
 
-    const conversationId = resolveConversationId(event);
-    if (!conversationId) {
-      return;
-    }
-
-    const target = {
-      chatId: message.chat_id,
-      replyToMessageId: message.message_id,
-    };
-
-    const fileInfo = extractFeishuFileInfo(message);
-    if (fileInfo) {
-      queuePendingFeishuAttachments(
-        conversationId,
-        [await buildManagedAttachment(client, message.message_id, fileInfo)],
-      );
-      await transport.sendText(target, 'File received. Send a prompt to use it.');
-      return;
-    }
-
-    const sessionKind = resolveFeishuChatSessionKind({
-      chatId: message.chat_id,
-      chatType: message.chat_type,
-    });
-
-    if (sessionKind.kind !== 'session-chat' && !shouldProcessFeishuMessage(message)) {
-      return;
-    }
-
-    const messageText = extractFeishuMessageText(message);
-
-    if (isFeishuDoneCommand(messageText)) {
-      if (message.chat_type === 'p2p') {
-        await transport.sendText(target, 'Use /done inside the session chat you want to close.');
+    let succeeded = false;
+    try {
+      await ensureInitialized();
+      const rawEvent = normalizeFeishuMessageReceiveEvent(payload);
+      const event = normalizeFeishuEvent(rawEvent);
+      const message = rawEvent.event?.message;
+      if (event.kind !== 'message' || !message) {
+        succeeded = true;
         return;
       }
 
-      await handleFeishuControlAction({
-        action: {
+      const conversationId = resolveConversationId(event);
+      if (!conversationId) {
+        succeeded = true;
+        return;
+      }
+
+      const target = {
+        chatId: message.chat_id,
+        replyToMessageId: message.message_id,
+      };
+
+      const fileInfo = extractFeishuFileInfo(message);
+      if (fileInfo) {
+        queuePendingFeishuAttachments(
           conversationId,
-          type: 'done',
-        },
-        target,
-        transport,
-        persist: persistState,
-      });
-      return;
-    }
-
-    const request = resolveFeishuMessageRequest(messageText);
-    if (!request.prompt) {
-      await transport.sendText(target, 'Please include a prompt after mentioning the bot.');
-      return;
-    }
-
-    if (message.chat_type === 'p2p') {
-      const duplicateSessionChat = findFeishuSessionChatBySourceMessage({
-        sourceP2pChatId: message.chat_id,
-        sourceMessageId: message.message_id,
-      });
-      if (duplicateSessionChat) {
-        return;
-      }
-
-      const creatorOpenId = resolveSenderOpenId(payload);
-      if (!creatorOpenId) {
-        await transport.sendText(target, 'Could not determine the Feishu user for this private chat.');
-        return;
-      }
-
-      const sessionChatName = buildSessionChatName(message.message_id, request.prompt);
-      let sessionChat: { chatId: string; name?: string };
-      try {
-        sessionChat = await client.createSessionChat({
-          name: sessionChatName,
-          userOpenId: creatorOpenId,
-        });
-      } catch (error) {
-        await transport.sendText(target, `Could not create session chat: ${describeError(error)}`);
-        return;
-      }
-
-      const sessionChatRecord = buildFeishuSessionChatRecord({
-        sourceP2pChatId: message.chat_id,
-        sourceMessageId: message.message_id,
-        sessionChatId: sessionChat.chatId,
-        creatorOpenId,
-        prompt: request.prompt,
-      });
-      rememberFeishuSessionChat(sessionChatRecord);
-
-      try {
-        await persistFeishuSessionChats(config.stateFile);
-      } catch (error) {
-        console.warn('[feishu] failed to persist session chat index:', error);
-      }
-
-      try {
-        await client.sendPrivateChatIndexMessage({
-          chatId: message.chat_id,
-          text: buildPrivateChatIndexText({
-            sessionChatName: sessionChat.name ?? sessionChatName,
-            sessionChatId: sessionChat.chatId,
-            promptPreview: sessionChatRecord.promptPreview,
-            createdAt: sessionChatRecord.createdAt,
-          }),
-        });
-      } catch (error) {
-        console.warn('[feishu] failed to send private-chat index message:', error);
-      }
-
-      try {
-        await client.sendMessage({
-          receiveId: sessionChat.chatId,
-          receiveIdType: 'chat_id',
-          msgType: 'text',
-          content: JSON.stringify({ text: request.prompt }),
-        });
-      } catch (error) {
-        await transport.sendText(
-          target,
-          `Session chat created, but the initial prompt could not be posted: ${describeError(error)}`,
+          [await buildManagedAttachment(client, message.message_id, fileInfo)],
         );
+        await transport.sendText(target, 'File received. Send a prompt to use it.');
+        succeeded = true;
+        return;
+      }
+
+      const sessionKind = resolveFeishuChatSessionKind({
+        chatId: message.chat_id,
+        chatType: message.chat_type,
+      });
+
+      if (sessionKind.kind !== 'session-chat' && !shouldProcessFeishuMessage(message)) {
+        succeeded = true;
+        return;
+      }
+
+      const messageText = extractFeishuMessageText(message);
+
+      if (isFeishuDoneCommand(messageText)) {
+        if (message.chat_type === 'p2p') {
+          await transport.sendText(target, 'Use /done inside the session chat you want to close.');
+          succeeded = true;
+          return;
+        }
+
+        await handleFeishuControlAction({
+          action: {
+            conversationId,
+            type: 'done',
+          },
+          target,
+          transport,
+          persist: persistFeishuState,
+        });
+        succeeded = true;
+        return;
+      }
+
+      const request = resolveFeishuMessageRequest(messageText);
+      if (!request.prompt) {
+        await transport.sendText(target, 'Please include a prompt after mentioning the bot.');
+        succeeded = true;
+        return;
+      }
+
+      if (message.chat_type === 'p2p') {
+        const duplicateSessionChat = findFeishuSessionChatBySourceMessage({
+          sourceP2pChatId: message.chat_id,
+          sourceMessageId: message.message_id,
+        });
+        if (duplicateSessionChat) {
+          succeeded = true;
+          return;
+        }
+
+        const creatorOpenId = resolveSenderOpenId(payload);
+        if (!creatorOpenId) {
+          await transport.sendText(target, 'Could not determine the Feishu user for this private chat.');
+          succeeded = true;
+          return;
+        }
+
+        const sessionChatName = buildSessionChatName(message.message_id, request.prompt);
+        let sessionChat: { chatId: string; name?: string };
+        try {
+          sessionChat = await client.createSessionChat({
+            name: sessionChatName,
+            userOpenId: creatorOpenId,
+          });
+        } catch (error) {
+          await transport.sendText(target, `Could not create session chat: ${describeError(error)}`);
+          succeeded = true;
+          return;
+        }
+
+        const sessionChatRecord = buildFeishuSessionChatRecord({
+          sourceP2pChatId: message.chat_id,
+          sourceMessageId: message.message_id,
+          sessionChatId: sessionChat.chatId,
+          creatorOpenId,
+          prompt: request.prompt,
+        });
+        rememberFeishuSessionChat(sessionChatRecord);
+
+        try {
+          await persistFeishuSessionChats(config.stateFile);
+        } catch (error) {
+          console.warn('[feishu] failed to persist session chat index:', error);
+        }
+
+        try {
+          await client.sendPrivateChatIndexMessage({
+            chatId: message.chat_id,
+            text: buildPrivateChatIndexText({
+              sessionChatName: sessionChat.name ?? sessionChatName,
+              sessionChatId: sessionChat.chatId,
+              promptPreview: sessionChatRecord.promptPreview,
+              createdAt: sessionChatRecord.createdAt,
+            }),
+          });
+        } catch (error) {
+          console.warn('[feishu] failed to send private-chat index message:', error);
+        }
+
+        try {
+          await client.sendMessage({
+            receiveId: sessionChat.chatId,
+            receiveIdType: 'chat_id',
+            msgType: 'text',
+            content: JSON.stringify({ text: request.prompt }),
+          });
+        } catch (error) {
+          await transport.sendText(
+            target,
+            `Session chat created, but the initial prompt could not be posted: ${describeError(error)}`,
+          );
+          succeeded = true;
+          return;
+        }
+
+        const result = await runFeishuConversation({
+          conversationId: sessionChat.chatId,
+          target: {
+            chatId: sessionChat.chatId,
+          },
+          prompt: request.prompt,
+          mode: request.mode,
+          transport,
+          defaultCwd: config.claudeCwd,
+          sourceMessageId: message.message_id,
+          attachments: drainPendingFeishuAttachments(message.chat_id),
+          persistState: persistFeishuState,
+        });
+
+        if (result.kind === 'busy') {
+          await transport.sendText({ chatId: sessionChat.chatId }, 'Conversation is already running.');
+        }
+        succeeded = true;
         return;
       }
 
       const result = await runFeishuConversation({
-        conversationId: sessionChat.chatId,
-        target: {
-          chatId: sessionChat.chatId,
-        },
+        conversationId,
+        target,
         prompt: request.prompt,
         mode: request.mode,
         transport,
         defaultCwd: config.claudeCwd,
         sourceMessageId: message.message_id,
-        attachments: drainPendingFeishuAttachments(message.chat_id),
-        persistState,
+        persistState: persistFeishuState,
       });
 
       if (result.kind === 'busy') {
-        await transport.sendText({ chatId: sessionChat.chatId }, 'Conversation is already running.');
+        await transport.sendText(target, 'Conversation is already running.');
       }
-      return;
-    }
-
-    const result = await runFeishuConversation({
-      conversationId,
-      target,
-      prompt: request.prompt,
-      mode: request.mode,
-      transport,
-      defaultCwd: config.claudeCwd,
-      sourceMessageId: message.message_id,
-      persistState,
-    });
-
-    if (result.kind === 'busy') {
-      await transport.sendText(target, 'Conversation is already running.');
+      succeeded = true;
+    } finally {
+      dedup.complete(succeeded);
     }
   }
 
   async function handleCardActionEvent(payload: FeishuCardActionTriggerEvent): Promise<void> {
-    await ensureInitialized();
-    const rawEvent = normalizeFeishuCardActionTriggerEvent(payload);
-    const event = normalizeFeishuEvent(rawEvent);
-    const action = rawEvent.action?.value as FeishuActionPayload['value'] | undefined;
-    const conversationId = resolveConversationIdFromAction(event);
-    if (!action || !conversationId || typeof action.chatId !== 'string') {
+    const dedup = ingressDeduplicator.claimCardAction(payload);
+    if (dedup.duplicate) {
       return;
     }
 
-    const target = {
-      chatId: action.chatId,
-      replyToMessageId: typeof action.replyToMessageId === 'string' ? action.replyToMessageId : undefined,
-    };
-    const actionType = action.action;
-    if (typeof actionType !== 'string') {
-      return;
-    }
-
-    if (actionType === 'control-panel') {
-      await openFeishuSessionControlPanel({
-        conversationId,
-        target,
-        transport,
-      });
-      return;
-    }
-
-    const result = await handleFeishuControlAction({
-      action: actionType === 'backend'
-        ? { conversationId, type: 'backend', value: action.value as 'claude' | 'codex' }
-        : actionType === 'confirm-backend'
-          ? { conversationId, type: 'confirm-backend', value: action.value as 'claude' | 'codex' }
-          : actionType === 'cancel-backend'
-            ? { conversationId, type: 'cancel-backend' }
-            : actionType === 'model'
-              ? { conversationId, type: 'model', value: String(action.value) }
-              : actionType === 'effort'
-                ? { conversationId, type: 'effort', value: String(action.value) }
-                : actionType === 'done'
-                  ? { conversationId, type: 'done' }
-                  : { conversationId, type: 'interrupt' },
-      target,
-      transport,
-      persist: persistState,
-    });
-
-    if (result.kind === 'backend-confirmation') {
-      await transport.sendCard(
-        target,
-        buildFeishuBackendConfirmationCardPayload(
-          result.card,
-          buildFeishuCardContext(conversationId, target),
-        ),
-      );
-      return;
-    }
-
-    if (actionType === 'backend' || actionType === 'confirm-backend') {
-      const resumed = await resumePendingFeishuRun({
-        conversationId,
-        transport,
-        defaultCwd: config.claudeCwd,
-        persistState,
-        fallback: typeof action.prompt === 'string' && action.prompt.trim()
-          ? {
-            target,
-            prompt: action.prompt.trim(),
-            mode: action.mode === 'ask' ? 'ask' : 'code',
-            sourceMessageId: target.replyToMessageId,
-          }
-          : undefined,
-      });
-
-      if (resumed.kind === 'busy') {
-        await transport.sendText(target, 'Conversation is already running.');
+    let succeeded = false;
+    try {
+      await ensureInitialized();
+      const rawEvent = normalizeFeishuCardActionTriggerEvent(payload);
+      const event = normalizeFeishuEvent(rawEvent);
+      const action = rawEvent.action?.value as FeishuActionPayload['value'] | undefined;
+      const conversationId = resolveConversationIdFromAction(event);
+      if (!action || !conversationId || typeof action.chatId !== 'string') {
+        succeeded = true;
+        return;
       }
+
+      const target = {
+        chatId: action.chatId,
+        replyToMessageId: typeof action.replyToMessageId === 'string' ? action.replyToMessageId : undefined,
+      };
+      const actionType = action.action;
+      if (typeof actionType !== 'string') {
+        succeeded = true;
+        return;
+      }
+
+      if (actionType === 'control-panel') {
+        await openFeishuSessionControlPanel({
+          conversationId,
+          target,
+          transport,
+        });
+        succeeded = true;
+        return;
+      }
+
+      const result = await handleFeishuControlAction({
+        action: actionType === 'backend'
+          ? { conversationId, type: 'backend', value: action.value as 'claude' | 'codex' }
+          : actionType === 'confirm-backend'
+            ? { conversationId, type: 'confirm-backend', value: action.value as 'claude' | 'codex' }
+            : actionType === 'cancel-backend'
+              ? { conversationId, type: 'cancel-backend' }
+              : actionType === 'model'
+                ? { conversationId, type: 'model', value: String(action.value) }
+                : actionType === 'effort'
+                  ? { conversationId, type: 'effort', value: String(action.value) }
+                  : actionType === 'done'
+                    ? { conversationId, type: 'done' }
+                    : { conversationId, type: 'interrupt' },
+        target,
+        transport,
+        persist: persistFeishuState,
+      });
+
+      if (result.kind === 'backend-confirmation') {
+        await transport.sendCard(
+          target,
+          buildFeishuBackendConfirmationCardPayload(
+            result.card,
+            buildFeishuCardContext(conversationId, target),
+          ),
+        );
+        succeeded = true;
+        return;
+      }
+
+      if (actionType === 'backend' || actionType === 'confirm-backend') {
+        const resumed = await resumePendingFeishuRun({
+          conversationId,
+          transport,
+          defaultCwd: config.claudeCwd,
+          persistState: persistFeishuState,
+          fallback: typeof action.prompt === 'string' && action.prompt.trim()
+            ? {
+              target,
+              prompt: action.prompt.trim(),
+              mode: action.mode === 'ask' ? 'ask' : 'code',
+              sourceMessageId: target.replyToMessageId,
+            }
+            : undefined,
+        });
+
+        if (resumed.kind === 'busy') {
+          await transport.sendText(target, 'Conversation is already running.');
+        }
+      }
+      succeeded = true;
+    } finally {
+      dedup.complete(succeeded);
     }
   }
 
   async function handleMenuActionEvent(payload: FeishuMenuActionTriggerEvent): Promise<void> {
-    await ensureInitialized();
-    const rawEvent = normalizeFeishuMenuActionTriggerEvent(payload);
-    const event = normalizeFeishuEvent(rawEvent);
-    const action = rawEvent.action?.value as FeishuActionPayload['value'] | undefined;
-    const conversationId = resolveConversationIdFromAction(event);
-    if (
-      event.kind !== 'action'
-      || event.source !== 'menu'
-      || event.action !== 'open-session-controls'
-      || !action
-      || !conversationId
-      || typeof action.chatId !== 'string'
-    ) {
+    const dedup = ingressDeduplicator.claimMenuAction(payload);
+    if (dedup.duplicate) {
       return;
     }
 
-    await openFeishuSessionControlPanel({
-      conversationId,
-      target: {
-        chatId: action.chatId,
-      },
-      transport,
-      requireKnownSessionChat: true,
-    });
+    let succeeded = false;
+    try {
+      await ensureInitialized();
+      const rawEvent = normalizeFeishuMenuActionTriggerEvent(payload);
+      const event = normalizeFeishuEvent(rawEvent);
+      const action = rawEvent.action?.value as FeishuActionPayload['value'] | undefined;
+      const conversationId = resolveConversationIdFromAction(event);
+      if (
+        event.kind !== 'action'
+        || event.source !== 'menu'
+        || event.action !== 'open-session-controls'
+        || !action
+        || !conversationId
+        || typeof action.chatId !== 'string'
+      ) {
+        succeeded = true;
+        return;
+      }
+
+      await openFeishuSessionControlPanel({
+        conversationId,
+        target: {
+          chatId: action.chatId,
+        },
+        transport,
+        requireKnownSessionChat: true,
+      });
+      succeeded = true;
+    } finally {
+      dedup.complete(succeeded);
+    }
   }
 
   return {

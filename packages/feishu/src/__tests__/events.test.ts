@@ -1,7 +1,8 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
+import { processedEventIds, processedMessages } from '@agent-im-relay/core';
 
 const coreMocks = vi.hoisted(() => ({
   initState: vi.fn(async () => undefined),
@@ -52,6 +53,7 @@ import {
   persistFeishuSessionChats,
   rememberFeishuSessionChat,
   resetFeishuSessionChatsForTests,
+  updateFeishuSessionChat,
 } from '../session-chat.js';
 
 const baseConfig = {
@@ -75,6 +77,8 @@ afterEach(async () => {
   runtimeMocks.queuePendingFeishuAttachments.mockReset();
   runtimeMocks.resumePendingFeishuRun.mockReset();
   runtimeMocks.runFeishuConversation.mockReset();
+  processedEventIds.clear();
+  processedMessages.clear();
   resetFeishuSessionChatsForTests();
   await rm(resolveFeishuSessionChatStateFile(baseConfig.stateFile), { force: true });
 });
@@ -325,6 +329,81 @@ describe('Feishu long-connection events', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  it('does not process the same Feishu message twice when it is redelivered', async () => {
+    runtimeMocks.runFeishuConversation.mockResolvedValue({ kind: 'started' });
+    const replyMessage = vi.fn(async () => undefined);
+    const router = createFeishuEventRouter(baseConfig, {
+      client: {
+        replyMessage,
+        sendMessage: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => undefined),
+        uploadFileContent: vi.fn(async () => 'file-key'),
+        sendFileMessage: vi.fn(async () => undefined),
+        downloadMessageResource: vi.fn(async () => new Response()),
+      } as never,
+    });
+
+    const firstDelivery = {
+      event_id: 'event-1',
+      message: {
+        message_id: 'message-dup-1',
+        chat_id: 'chat-1',
+        chat_type: 'group',
+        message_type: 'text',
+        mentions: [{ id: { open_id: 'bot-open-id' }, name: 'relay-bot' }],
+        content: JSON.stringify({ text: '@_user_1 hello bot' }),
+      },
+    } as const;
+
+    await router.handleMessageEvent(firstDelivery);
+    await router.handleMessageEvent({
+      ...firstDelivery,
+      event_id: 'event-2',
+    });
+
+    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledOnce();
+    expect(replyMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: JSON.stringify({ text: 'Conversation is already running.' }),
+    }));
+  });
+
+  it('allows the same Feishu message to be retried after the first handling attempt fails', async () => {
+    runtimeMocks.runFeishuConversation
+      .mockRejectedValueOnce(new Error('transient failure'))
+      .mockResolvedValueOnce({ kind: 'started' });
+
+    const router = createFeishuEventRouter(baseConfig, {
+      client: {
+        replyMessage: vi.fn(async () => undefined),
+        sendMessage: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => undefined),
+        uploadFileContent: vi.fn(async () => 'file-key'),
+        sendFileMessage: vi.fn(async () => undefined),
+        downloadMessageResource: vi.fn(async () => new Response()),
+      } as never,
+    });
+
+    const firstDelivery = {
+      event_id: 'event-retry-1',
+      message: {
+        message_id: 'message-retry-1',
+        chat_id: 'chat-1',
+        chat_type: 'group',
+        message_type: 'text',
+        mentions: [{ id: { open_id: 'bot-open-id' }, name: 'relay-bot' }],
+        content: JSON.stringify({ text: '@_user_1 hello bot' }),
+      },
+    } as const;
+
+    await expect(router.handleMessageEvent(firstDelivery)).rejects.toThrow(/transient failure/i);
+    await expect(router.handleMessageEvent({
+      ...firstDelivery,
+      event_id: 'event-retry-2',
+    })).resolves.toBeUndefined();
+
+    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledTimes(2);
+  });
+
   it('returns a visible private-chat error when session-group creation fails', async () => {
     const replyMessage = vi.fn(async () => undefined);
     const createSessionChat = vi.fn(async () => {
@@ -364,6 +443,64 @@ describe('Feishu long-connection events', () => {
       content: JSON.stringify({ text: 'Could not create session chat: permission denied' }),
     }));
     expect(runtimeMocks.runFeishuConversation).not.toHaveBeenCalled();
+  });
+
+  it('passes a persistence callback that saves both core state and the session-chat index', async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), 'feishu-events-persist-'));
+    const stateFile = path.join(tempDir, 'sessions.json');
+
+    rememberFeishuSessionChat(buildFeishuSessionChatRecord({
+      sourceP2pChatId: 'p2p-chat-1',
+      sourceMessageId: 'message-1',
+      sessionChatId: 'session-chat-1',
+      creatorOpenId: 'ou_user_1',
+      createdAt: '2026-03-08T10:00:00.000Z',
+      prompt: 'Ship it',
+    }));
+    await persistFeishuSessionChats(stateFile);
+    runtimeMocks.runFeishuConversation.mockImplementationOnce(async (options: {
+      persistState?: () => Promise<void>;
+    }) => {
+      updateFeishuSessionChat('session-chat-1', {
+        anchorMessageId: 'anchor-message-1',
+        lastKnownBackend: 'codex',
+        lastRunStatus: 'idle',
+      });
+      await options.persistState?.();
+      return { kind: 'started' };
+    });
+
+    const router = createFeishuEventRouter({
+      ...baseConfig,
+      stateFile,
+      artifactsBaseDir: path.join(tempDir, 'artifacts'),
+    }, {
+      client: {
+        replyMessage: vi.fn(async () => undefined),
+        sendMessage: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => undefined),
+        uploadFileContent: vi.fn(async () => 'file-key'),
+        sendFileMessage: vi.fn(async () => undefined),
+        downloadMessageResource: vi.fn(async () => new Response()),
+      } as never,
+    });
+
+    await router.handleMessageEvent({
+      message: {
+        message_id: 'message-2',
+        chat_id: 'session-chat-1',
+        chat_type: 'group',
+        message_type: 'text',
+        mentions: [{ id: { open_id: 'bot-open-id' }, name: 'relay-bot' }],
+        content: JSON.stringify({ text: '@_user_1 ship it' }),
+      },
+    });
+
+    expect(coreMocks.persistState).toHaveBeenCalledOnce();
+    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledOnce();
+    await expect(readFile(resolveFeishuSessionChatStateFile(stateFile), 'utf-8')).resolves.toContain('"anchorMessageId": "anchor-message-1"');
+
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   it('continues the session-group flow when the private-chat index message fails', async () => {
@@ -531,6 +668,40 @@ describe('Feishu long-connection events', () => {
         replyToMessageId: 'open-message-1',
       },
     }));
+  });
+
+  it('does not apply the same card action twice when Feishu redelivers it', async () => {
+    runtimeMocks.handleFeishuControlAction.mockResolvedValue({ kind: 'applied' });
+    runtimeMocks.resumePendingFeishuRun.mockResolvedValue({ kind: 'none' });
+
+    const router = createFeishuEventRouter(baseConfig, {
+      client: {
+        replyMessage: vi.fn(async () => undefined),
+        sendMessage: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => undefined),
+        uploadFileContent: vi.fn(async () => 'file-key'),
+        sendFileMessage: vi.fn(async () => undefined),
+        downloadMessageResource: vi.fn(async () => new Response()),
+      } as never,
+    });
+
+    const payload = {
+      open_id: 'ou_user_1',
+      open_message_id: 'open-message-1',
+      action: {
+        tag: 'button',
+        value: {
+          conversationId: 'conv-1',
+          chatId: 'chat-1',
+          action: 'interrupt',
+        },
+      },
+    } as const;
+
+    await router.handleCardActionEvent(payload);
+    await router.handleCardActionEvent(payload);
+
+    expect(runtimeMocks.handleFeishuControlAction).toHaveBeenCalledOnce();
   });
 
   it('opens the expanded control panel when the anchor control action is clicked', async () => {
