@@ -1,15 +1,17 @@
 import type { Message } from 'discord.js';
 import { stripArtifactManifest, type AgentEnvironment, type AgentStreamEvent } from '@agent-im-relay/core';
 import { config } from './config.js';
+import { buildDiscordReplyPayload, type DiscordReplyContext } from './reply-context.js';
 
 export type StreamTargetChannel = {
-  send(content: string | { content: string; embeds?: any[] }): Promise<Message<boolean>>;
+  send(content: string | { content: string; embeds?: any[]; allowedMentions?: { users: string[] } }): Promise<Message<boolean>>;
 };
 
 type StreamToDiscordOptions = {
   channel: StreamTargetChannel;
   initialMessage?: Message<boolean>;
   showEnvironment?: boolean;
+  replyContext?: DiscordReplyContext;
 };
 
 type EmbedFieldData = {
@@ -410,8 +412,10 @@ export async function streamAgentToDiscord(
   const showEnvironment = options.showEnvironment ?? false;
   const messages: Message<boolean>[] = [];
   let environmentMessage: Message<boolean> | undefined;
+  let mentionSent = false;
   if (options.initialMessage) {
     messages.push(options.initialMessage);
+    mentionSent = true;
   }
 
   let buffer = '';
@@ -433,11 +437,18 @@ export async function streamAgentToDiscord(
     if (messages.length === 0) {
       const firstChunk = chunks[0] ?? ZERO_WIDTH_SPACE;
       const first = await options.channel.send(
-        embeds.length > 0
-          ? { content: firstChunk, embeds }
-          : firstChunk,
+        !mentionSent
+          ? buildDiscordReplyPayload(
+              firstChunk,
+              options.replyContext,
+              embeds.length > 0 ? { embeds } : undefined,
+            )
+          : embeds.length > 0
+            ? { content: firstChunk, embeds }
+            : firstChunk,
       );
       messages.push(first);
+      mentionSent = mentionSent || Boolean(options.replyContext);
     }
 
     for (let index = 0; index < chunks.length; index += 1) {
@@ -478,7 +489,12 @@ export async function streamAgentToDiscord(
       if (environmentMessage) {
         await environmentMessage.edit(content).catch(() => {});
       } else {
-        environmentMessage = await options.channel.send(content);
+        environmentMessage = await options.channel.send(
+          !mentionSent
+            ? buildDiscordReplyPayload(content, options.replyContext)
+            : content,
+        );
+        mentionSent = mentionSent || Boolean(options.replyContext);
       }
     } else if (event.type === 'text') {
       if (isThinking) {

@@ -401,4 +401,42 @@ describe('streamAgentToDiscord', () => {
     expect(send).toHaveBeenCalledWith('Here is your summary.');
     expect(edit).not.toHaveBeenCalledWith(expect.stringContaining('```artifacts'));
   });
+
+  it('mentions the triggering bot on the first visible send without duplicating it on later edits', async () => {
+    const dateNow = vi.spyOn(Date, 'now');
+    let tick = 0;
+    dateNow.mockImplementation(() => {
+      tick += 1_000;
+      return tick;
+    });
+
+    const edit = vi.fn().mockResolvedValue(undefined);
+    const message = { edit } as any;
+    const send = vi.fn().mockResolvedValue(message);
+
+    async function* events() {
+      yield { type: 'text' as const, delta: 'First chunk' };
+      yield { type: 'text' as const, delta: ' and second chunk' };
+      yield { type: 'done' as const };
+    }
+
+    await streamAgentToDiscord(
+      {
+        channel: { send },
+        replyContext: { mentionUserId: 'other-bot' },
+      },
+      events(),
+    );
+
+    expect(send).toHaveBeenNthCalledWith(1, {
+      content: '<@other-bot> First chunk',
+      allowedMentions: { users: ['other-bot'] },
+    });
+    expect(edit).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'First chunk and second chunk',
+    }));
+    expect(edit).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('<@other-bot>'),
+    }));
+  });
 });
