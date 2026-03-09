@@ -494,13 +494,13 @@ export function createFeishuEventRouter(
       return;
     }
 
-    await initState();
+    await initState('feishu');
     await initializeFeishuSessionChats(config.stateFile);
     initialized = true;
   }
 
   async function persistFeishuState(): Promise<void> {
-    await persistState();
+    await persistState('feishu');
     try {
       await persistFeishuSessionChats(config.stateFile);
     } catch (error) {

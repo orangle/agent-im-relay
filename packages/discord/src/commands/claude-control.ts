@@ -140,7 +140,7 @@ async function handleModelCommand(interaction: ChatInputCommandInteraction): Pro
     value: model,
   });
   if (result.persist) {
-    void core.persistState();
+    void core.persistState('discord');
   }
   await interaction.reply({ content: `Set model to \`${model}\` for this thread.`, ephemeral: true });
 }
@@ -156,7 +156,7 @@ async function handleEffortCommand(interaction: ChatInputCommandInteraction): Pr
     value: level,
   });
   if (result.persist) {
-    void core.persistState();
+    void core.persistState('discord');
   }
   await interaction.reply({ content: `Set effort to \`${level}\` for this thread.`, ephemeral: true });
 }
@@ -205,7 +205,7 @@ async function handleCwdCommand(interaction: ChatInputCommandInteraction): Promi
     }
 
     conversationCwd.set(channel.id, path);
-    void core.persistState();
+    void core.persistState('discord');
     await interaction.reply({
       content: `Set working directory override to \`${path}\` for this thread.`,
       ephemeral: true,
@@ -216,7 +216,7 @@ async function handleCwdCommand(interaction: ChatInputCommandInteraction): Promi
   if (subcommand === 'clear') {
     const removed = conversationCwd.delete(channel.id);
     if (removed) {
-      void core.persistState();
+      void core.persistState('discord');
       await interaction.reply({
         content: 'Cleared the working directory override. Future runs will auto-detect it.',
         ephemeral: true,
@@ -258,7 +258,7 @@ async function handleCompactCommand(interaction: ChatInputCommandInteraction): P
       mode: 'code',
       backend: conversationBackend.get(channel.id),
       defaultCwd: config.claudeCwd,
-      persist: core.persistState,
+      persist: () => core.persistState('discord'),
       render: ({ target, showEnvironment }, events) => streamAgentToDiscord(
         {
           channel: target,

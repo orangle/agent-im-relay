@@ -8,6 +8,7 @@ import {
 } from './artifacts/store.js';
 import type { ConversationArtifactMetadata } from './artifacts/types.js';
 import { loadState, saveState } from './persist.js';
+import type { RelayPlatform } from './relay-platform.js';
 import type { ThreadContinuationSnapshot, ThreadSessionBinding } from './thread-session/types.js';
 
 // Generalized keys: "conversation" instead of "thread"
@@ -78,7 +79,7 @@ export async function persistConversationArtifactMetadata(
   return cloneArtifactMetadata(normalized);
 }
 
-export async function initState(): Promise<void> {
+export async function initState(platform?: RelayPlatform): Promise<void> {
   await loadState(
     conversationSessions,
     conversationModels,
@@ -88,6 +89,7 @@ export async function initState(): Promise<void> {
     threadSessionBindings,
     threadContinuationSnapshots,
     savedCwdList,
+    { platform },
   );
   await Promise.all(trackedConversationIds().map(async (conversationId) => {
     try {
@@ -99,7 +101,7 @@ export async function initState(): Promise<void> {
   }));
 }
 
-export async function persistState(): Promise<void> {
+export async function persistState(platform?: RelayPlatform): Promise<void> {
   await saveState(
     conversationSessions,
     conversationModels,
@@ -109,5 +111,6 @@ export async function persistState(): Promise<void> {
     threadSessionBindings,
     threadContinuationSnapshots,
     savedCwdList,
+    { platform },
   );
 }

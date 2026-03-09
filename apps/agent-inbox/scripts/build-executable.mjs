@@ -1,7 +1,8 @@
-import { chmod, copyFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { prepareSeaBuild } from './sea-build.mjs';
 
 const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(packageDir, 'dist');
@@ -26,11 +27,12 @@ function run(command, args) {
   }
 }
 
-await writeFile(seaConfigFile, JSON.stringify({
-  main: entryFile,
-  output: blobFile,
-  disableExperimentalSEAWarning: true,
-}, null, 2));
+await prepareSeaBuild({
+  distDir,
+  entryFile,
+  blobFile,
+  seaConfigFile,
+});
 
 run(process.execPath, ['--experimental-sea-config', seaConfigFile]);
 await copyFile(process.execPath, executableFile);
