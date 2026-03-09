@@ -549,7 +549,7 @@ describe('Feishu long-connection events', () => {
     }));
   });
 
-  it('allows the same Feishu message to be retried after the first handling attempt fails', async () => {
+  it('marks a failed message as processed so redelivery does not trigger a second run', async () => {
     runtimeMocks.runFeishuConversation
       .mockRejectedValueOnce(new Error('transient failure'))
       .mockResolvedValueOnce({ kind: 'started' });
@@ -584,7 +584,7 @@ describe('Feishu long-connection events', () => {
       event_id: 'event-retry-2',
     })).resolves.toBeUndefined();
 
-    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledTimes(2);
+    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledTimes(1);
     const errorReply = replyMessage.mock.calls
       .map(call => call[0])
       .find(call => call.msgType === 'post' && call.messageId === 'message-retry-1');

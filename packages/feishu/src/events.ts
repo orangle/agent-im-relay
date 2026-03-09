@@ -667,6 +667,7 @@ export function createFeishuEventRouter(
         });
       } catch (error) {
         await transport.sendText(target, describeError(error)).catch(() => {});
+        succeeded = true;
         return;
       }
       succeeded = true;
@@ -766,6 +767,7 @@ export function createFeishuEventRouter(
           }
         } catch (error) {
           await transport.sendText(target, describeError(error)).catch(() => {});
+          succeeded = true;
           return;
         }
       }
