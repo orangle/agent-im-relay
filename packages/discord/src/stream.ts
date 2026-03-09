@@ -424,10 +424,21 @@ export async function streamAgentToDiscord(
   let renderedEmbedsSignature = '[]';
   let toolCount = 0;
   let isThinking = false;
+  let hasSubstantiveOutput = false;
   const maxLength = Math.max(200, config.discordMessageCharLimit);
 
   const flush = async (): Promise<void> => {
-    const body = stripArtifactManifest(buffer).trim() || '⏳ Thinking...';
+    const strippedBody = stripArtifactManifest(buffer).trim();
+    if (
+      options.replyContext
+      && !mentionSent
+      && messages.length === 0
+      && !hasSubstantiveOutput
+    ) {
+      return;
+    }
+
+    const body = strippedBody || '⏳ Thinking...';
     const converted = convertMarkdownForDiscord(body);
     const embeds = converted.embeds as any[];
     const embedsSignature = JSON.stringify(converted.embeds);
@@ -489,12 +500,7 @@ export async function streamAgentToDiscord(
       if (environmentMessage) {
         await environmentMessage.edit(content).catch(() => {});
       } else {
-        environmentMessage = await options.channel.send(
-          !mentionSent
-            ? buildDiscordReplyPayload(content, options.replyContext)
-            : content,
-        );
-        mentionSent = mentionSent || Boolean(options.replyContext);
+        environmentMessage = await options.channel.send(content);
       }
     } else if (event.type === 'text') {
       if (isThinking) {
@@ -502,9 +508,11 @@ export async function streamAgentToDiscord(
         buffer = '';
       }
       buffer += event.delta;
+      hasSubstantiveOutput = hasSubstantiveOutput || stripArtifactManifest(buffer).trim().length > 0;
     } else if (event.type === 'tool') {
       toolCount++;
       buffer += '\n' + formatToolLine(event.summary) + '\n';
+      hasSubstantiveOutput = true;
     } else if (event.type === 'status') {
       // Show thinking/status as subtle indicator, don't spam
       if (!isThinking && !buffer.trim()) {
@@ -517,9 +525,13 @@ export async function streamAgentToDiscord(
       } else {
         buffer += `\n\n❌ **Error:** ${event.error}\n`;
       }
+      hasSubstantiveOutput = true;
     } else if (event.type === 'done') {
       if (!buffer.trim() && event.result) {
         buffer = event.result;
+      }
+      if (event.result && stripArtifactManifest(event.result).trim().length > 0) {
+        hasSubstantiveOutput = true;
       }
       // Append tool count summary if tools were used
       if (toolCount > 0) {
