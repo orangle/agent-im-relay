@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { FeishuConfig } from './config.js';
 
 export type FeishuReceiveIdType = 'chat_id' | 'open_id' | 'union_id' | 'email' | 'user_id';
-export type FeishuMessageType = 'text' | 'interactive' | 'file';
+export type FeishuMessageType = 'text' | 'interactive' | 'file' | 'share_chat';
 export type FeishuUserIdType = 'open_id' | 'union_id' | 'user_id';
 
 type FetchLike = typeof fetch;
@@ -78,6 +78,10 @@ export function createFeishuClient(
   uploadFile(options: { filePath: string; fileName: string }): Promise<string>;
   uploadFileContent(options: { fileName: string; data: Buffer | Uint8Array | ArrayBuffer }): Promise<string>;
   sendFileMessage(receiveId: string, fileKey: string, receiveIdType?: FeishuReceiveIdType): Promise<string | undefined>;
+  sendSharedChatMessage(options: {
+    receiveId: string;
+    chatId: string;
+  }): Promise<string | undefined>;
   sendPrivateChatIndexMessage(options: {
     chatId: string;
     text: string;
@@ -343,6 +347,18 @@ export function createFeishuClient(
     });
   }
 
+  async function sendSharedChatMessage(options: {
+    receiveId: string;
+    chatId: string;
+  }): Promise<string | undefined> {
+    return sendMessage({
+      receiveId: options.receiveId,
+      receiveIdType: 'chat_id',
+      msgType: 'share_chat',
+      content: JSON.stringify({ chat_id: options.chatId }),
+    });
+  }
+
   async function sendPrivateChatIndexMessage(options: {
     chatId: string;
     text: string;
@@ -374,6 +390,7 @@ export function createFeishuClient(
     uploadFile,
     uploadFileContent: uploadBinary,
     sendFileMessage,
+    sendSharedChatMessage,
     sendPrivateChatIndexMessage,
     downloadMessageResource,
   };

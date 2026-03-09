@@ -117,7 +117,7 @@ describe('Feishu API client', () => {
     );
   });
 
-  it('posts a private-chat index message', async () => {
+  it('sends a native shared-chat message into the private launcher chat', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         code: 0,
@@ -131,9 +131,9 @@ describe('Feishu API client', () => {
 
     const client = createFeishuClient(testConfig(), { fetchImpl: fetchImpl as typeof fetch });
 
-    await expect(client.sendPrivateChatIndexMessage({
-      chatId: 'p2p-chat-1',
-      text: '会话已创建：Alice · Fix relay startup · a1f4',
+    await expect(client.sendSharedChatMessage({
+      receiveId: 'p2p-chat-1',
+      chatId: 'session-chat-1',
     })).resolves.toBe('message-index-1');
 
     expect(fetchImpl).toHaveBeenLastCalledWith(
@@ -146,8 +146,8 @@ describe('Feishu API client', () => {
         }),
         body: JSON.stringify({
           receive_id: 'p2p-chat-1',
-          msg_type: 'text',
-          content: JSON.stringify({ text: '会话已创建：Alice · Fix relay startup · a1f4' }),
+          msg_type: 'share_chat',
+          content: JSON.stringify({ chat_id: 'session-chat-1' }),
         }),
       }),
     );
