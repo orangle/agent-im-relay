@@ -26,6 +26,7 @@ import { createDiscordAdapter } from './adapter.js';
 import type { StreamTargetChannel } from './stream.js';
 import { hasOpenStickyThreadSession, runMentionConversation } from './conversation.js';
 import { collectMessageAttachments } from './files.js';
+import { resolveInboundDiscordMessage } from './message-routing.js';
 import { ensureMentionThread } from './thread.js';
 import { askCommand, handleAskCommand } from './commands/ask.js';
 import { codeCommand, handleCodeCommand } from './commands/code.js';
@@ -94,11 +95,6 @@ async function registerSlashCommands(): Promise<void> {
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-function extractMentionPrompt(content: string, botId: string): string {
-  const mentionRegex = new RegExp(`<@!?${botId}>`, 'g');
-  return content.replace(mentionRegex, '').replace(/\s+/g, ' ').trim();
 }
 
 // --- Reaction status indicator ---
@@ -187,24 +183,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !message.inGuild()) return;
-
   const botUser = client.user;
   if (!botUser) return;
 
-  const isExplicitMention = new RegExp(`<@!?${botUser.id}>`).test(message.content);
-  const isActiveThread = message.channel.isThread() && hasOpenStickyThreadSession(message.channel.id);
-
-  if (!isExplicitMention && !isActiveThread) return;
+  const routedMessage = resolveInboundDiscordMessage({
+    relayBotId: botUser.id,
+    authorId: message.author.id,
+    authorBot: message.author.bot,
+    content: message.content,
+    inGuild: message.inGuild(),
+    inActiveThread: message.channel.isThread() && hasOpenStickyThreadSession(message.channel.id),
+  });
+  if (!routedMessage.accepted) return;
 
   // Dedup guard
   if (processedMessages.has(message.id)) return;
   processedMessages.add(message.id);
   setTimeout(() => processedMessages.delete(message.id), 60_000);
 
-  const prompt = isExplicitMention
-    ? extractMentionPrompt(message.content, botUser.id)
-    : message.content.trim();
+  const prompt = routedMessage.prompt;
 
   if (!prompt) {
     await message.reply('Please include a prompt after mentioning me.');
