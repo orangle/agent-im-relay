@@ -180,17 +180,20 @@ describe('Feishu long-connection events', () => {
     runtimeMocks.runFeishuConversation.mockResolvedValue({ kind: 'started' });
     const createSessionChat = vi.fn(async () => ({
       chatId: 'session-chat-1',
-      name: 'Session · hello bot · ge-1',
+      name: 'Session · hello bot',
     }));
-    const sendPrivateChatIndexMessage = vi.fn(async () => 'message-index-1');
-    const sendMessage = vi.fn(async () => 'message-session-prompt-1');
+    const sendSharedChatMessage = vi.fn(async () => 'message-share-1');
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce('message-ref-1')
+      .mockResolvedValueOnce('message-session-prompt-1');
+    const sendCard = vi.fn(async () => 'message-card-1');
     const router = createFeishuEventRouter(baseConfig, {
       client: {
         createSessionChat,
-        sendPrivateChatIndexMessage,
+        sendSharedChatMessage,
         replyMessage: vi.fn(async () => undefined),
         sendMessage,
-        sendCard: vi.fn(async () => undefined),
+        sendCard,
         uploadFileContent: vi.fn(async () => 'file-key'),
         sendFileMessage: vi.fn(async () => undefined),
         downloadMessageResource: vi.fn(async () => new Response()),
@@ -214,13 +217,20 @@ describe('Feishu long-connection events', () => {
 
     expect(createSessionChat).toHaveBeenCalledWith(expect.objectContaining({
       userOpenId: 'ou_user_1',
-      name: expect.stringContaining('hello bot'),
+      name: 'Session · hello bot',
     }));
-    expect(sendPrivateChatIndexMessage).toHaveBeenCalledWith(expect.objectContaining({
-      chatId: 'p2p-chat-1',
-      text: expect.stringContaining('session-chat-1'),
+    expect(sendSharedChatMessage).toHaveBeenCalledWith({
+      receiveId: 'p2p-chat-1',
+      chatId: 'session-chat-1',
+    });
+    expect(sendMessage).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      receiveId: 'session-chat-1',
+      msgType: 'text',
+      content: JSON.stringify({
+        text: 'Common commands:\n/interrupt - stop the current run',
+      }),
     }));
-    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+    expect(sendMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({
       receiveId: 'session-chat-1',
       msgType: 'text',
       content: JSON.stringify({ text: 'hello bot' }),
@@ -239,17 +249,19 @@ describe('Feishu long-connection events', () => {
     runtimeMocks.runFeishuConversation.mockResolvedValue({ kind: 'started' });
     const createSessionChat = vi.fn(async () => ({
       chatId: 'session-chat-1',
-      name: 'Session · hello bot · ge-1',
+      name: 'Session · hello bot',
     }));
-    const sendPrivateChatIndexMessage = vi.fn(async () => 'message-index-1');
-    const sendMessage = vi.fn(async () => 'message-session-prompt-1');
+    const sendSharedChatMessage = vi.fn(async () => 'message-share-1');
+    const sendMessage = vi.fn()
+      .mockResolvedValueOnce('message-ref-1')
+      .mockResolvedValueOnce('message-session-prompt-1');
     const router = createFeishuEventRouter(baseConfig, {
       client: {
         createSessionChat,
-        sendPrivateChatIndexMessage,
+        sendSharedChatMessage,
         replyMessage: vi.fn(async () => undefined),
         sendMessage,
-        sendCard: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => 'message-card-1'),
         uploadFileContent: vi.fn(async () => 'file-key'),
         sendFileMessage: vi.fn(async () => undefined),
         downloadMessageResource: vi.fn(async () => new Response()),
@@ -275,8 +287,56 @@ describe('Feishu long-connection events', () => {
     await router.handleMessageEvent(payload);
 
     expect(createSessionChat).toHaveBeenCalledOnce();
-    expect(sendPrivateChatIndexMessage).toHaveBeenCalledOnce();
-    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendSharedChatMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledOnce();
+  });
+
+  it('ignores the mirrored prompt message when Feishu later delivers it as a group event', async () => {
+    runtimeMocks.runFeishuConversation.mockResolvedValue({ kind: 'started' });
+    const router = createFeishuEventRouter(baseConfig, {
+      client: {
+        createSessionChat: vi.fn(async () => ({
+          chatId: 'session-chat-1',
+          name: 'Session · hello bot',
+        })),
+        sendSharedChatMessage: vi.fn(async () => 'message-share-1'),
+        replyMessage: vi.fn(async () => undefined),
+        sendMessage: vi.fn()
+          .mockResolvedValueOnce('message-ref-1')
+          .mockResolvedValueOnce('message-session-prompt-1'),
+        sendCard: vi.fn(async () => 'message-card-1'),
+        uploadFileContent: vi.fn(async () => 'file-key'),
+        sendFileMessage: vi.fn(async () => undefined),
+        downloadMessageResource: vi.fn(async () => new Response()),
+      } as never,
+    });
+
+    await router.handleMessageEvent({
+      sender: {
+        sender_id: {
+          open_id: 'ou_user_1',
+        },
+      },
+      message: {
+        message_id: 'message-1',
+        chat_id: 'p2p-chat-1',
+        chat_type: 'p2p',
+        message_type: 'text',
+        content: JSON.stringify({ text: 'hello bot' }),
+      },
+    });
+
+    await router.handleMessageEvent({
+      message: {
+        message_id: 'message-session-prompt-1',
+        chat_id: 'session-chat-1',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({ text: 'hello bot' }),
+      },
+    });
+
     expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledOnce();
   });
 
@@ -412,10 +472,10 @@ describe('Feishu long-connection events', () => {
     const router = createFeishuEventRouter(baseConfig, {
       client: {
         createSessionChat,
-        sendPrivateChatIndexMessage: vi.fn(async () => undefined),
+        sendSharedChatMessage: vi.fn(async () => undefined),
         replyMessage,
         sendMessage: vi.fn(async () => undefined),
-        sendCard: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => 'message-card-1'),
         uploadFileContent: vi.fn(async () => 'file-key'),
         sendFileMessage: vi.fn(async () => undefined),
         downloadMessageResource: vi.fn(async () => new Response()),
@@ -498,29 +558,29 @@ describe('Feishu long-connection events', () => {
 
     expect(coreMocks.persistState).toHaveBeenCalledOnce();
     expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledOnce();
-    await expect(readFile(resolveFeishuSessionChatStateFile(stateFile), 'utf-8')).resolves.toContain('"anchorMessageId": "anchor-message-1"');
+    await expect(readFile(resolveFeishuSessionChatStateFile(stateFile), 'utf-8')).resolves.toContain('"sessionChatId": "session-chat-1"');
 
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it('continues the session-group flow when the private-chat index message fails', async () => {
+  it('returns a visible private-chat error when the shared chat receipt cannot be sent', async () => {
     runtimeMocks.runFeishuConversation.mockResolvedValue({ kind: 'started' });
     const createSessionChat = vi.fn(async () => ({
       chatId: 'session-chat-1',
-      name: 'Session · hello bot · ge-1',
+      name: 'Session · hello bot',
     }));
-    const sendPrivateChatIndexMessage = vi.fn(async () => {
-      throw new Error('message send failed');
+    const sendSharedChatMessage = vi.fn(async () => {
+      throw new Error('shared chat failed');
     });
+    const replyMessage = vi.fn(async () => undefined);
     const sendMessage = vi.fn(async () => 'message-session-prompt-1');
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const router = createFeishuEventRouter(baseConfig, {
       client: {
         createSessionChat,
-        sendPrivateChatIndexMessage,
-        replyMessage: vi.fn(async () => undefined),
+        sendSharedChatMessage,
+        replyMessage,
         sendMessage,
-        sendCard: vi.fn(async () => undefined),
+        sendCard: vi.fn(async () => 'message-card-1'),
         uploadFileContent: vi.fn(async () => 'file-key'),
         sendFileMessage: vi.fn(async () => undefined),
         downloadMessageResource: vi.fn(async () => new Response()),
@@ -542,16 +602,13 @@ describe('Feishu long-connection events', () => {
       },
     });
 
-    expect(warn).toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      receiveId: 'session-chat-1',
+    expect(replyMessage).toHaveBeenCalledWith(expect.objectContaining({
+      messageId: 'message-1',
       msgType: 'text',
+      content: JSON.stringify({ text: 'Could not share session chat: shared chat failed' }),
     }));
-    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledWith(expect.objectContaining({
-      conversationId: 'session-chat-1',
-    }));
-
-    warn.mockRestore();
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(runtimeMocks.runFeishuConversation).not.toHaveBeenCalled();
   });
 
   it('queues file attachments from message events and acknowledges them', async () => {

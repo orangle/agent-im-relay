@@ -35,6 +35,12 @@ export function buildFeishuSessionReferenceText(): string {
   return FEISHU_SESSION_REFERENCE_TEXT;
 }
 
+function describeLauncherError(error: unknown): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message.trim()
+    : 'unknown error';
+}
+
 export async function launchFeishuSessionFromPrivateChat(options: {
   client: FeishuLauncherClient;
   sourceChatId: string;
@@ -44,10 +50,18 @@ export async function launchFeishuSessionFromPrivateChat(options: {
   mode: AgentMode;
   persist?: () => Promise<void>;
 }): Promise<FeishuLaunchResult> {
-  const sessionChat = await options.client.createSessionChat({
-    name: buildFeishuSessionChatName(options.prompt),
-    userOpenId: options.creatorOpenId,
-  });
+  let sessionChat: {
+    chatId: string;
+    name?: string;
+  };
+  try {
+    sessionChat = await options.client.createSessionChat({
+      name: buildFeishuSessionChatName(options.prompt),
+      userOpenId: options.creatorOpenId,
+    });
+  } catch (error) {
+    throw new Error(`Could not create session chat: ${describeLauncherError(error)}`);
+  }
 
   rememberFeishuSessionChat(buildFeishuSessionChatRecord({
     sourceP2pChatId: options.sourceChatId,
@@ -58,26 +72,41 @@ export async function launchFeishuSessionFromPrivateChat(options: {
   }));
   await options.persist?.();
 
-  await options.client.sendSharedChatMessage({
-    receiveId: options.sourceChatId,
-    chatId: sessionChat.chatId,
-  });
-  await options.client.sendMessage({
-    receiveId: sessionChat.chatId,
-    receiveIdType: 'chat_id',
-    msgType: 'text',
-    content: JSON.stringify({
-      text: buildFeishuSessionReferenceText(),
-    }),
-  });
-  const mirroredMessageId = await options.client.sendMessage({
-    receiveId: sessionChat.chatId,
-    receiveIdType: 'chat_id',
-    msgType: 'text',
-    content: JSON.stringify({
-      text: options.prompt,
-    }),
-  });
+  try {
+    await options.client.sendSharedChatMessage({
+      receiveId: options.sourceChatId,
+      chatId: sessionChat.chatId,
+    });
+  } catch (error) {
+    throw new Error(`Could not share session chat: ${describeLauncherError(error)}`);
+  }
+
+  try {
+    await options.client.sendMessage({
+      receiveId: sessionChat.chatId,
+      receiveIdType: 'chat_id',
+      msgType: 'text',
+      content: JSON.stringify({
+        text: buildFeishuSessionReferenceText(),
+      }),
+    });
+  } catch (error) {
+    throw new Error(`Could not initialize session chat: ${describeLauncherError(error)}`);
+  }
+
+  let mirroredMessageId: string | undefined;
+  try {
+    mirroredMessageId = await options.client.sendMessage({
+      receiveId: sessionChat.chatId,
+      receiveIdType: 'chat_id',
+      msgType: 'text',
+      content: JSON.stringify({
+        text: options.prompt,
+      }),
+    });
+  } catch (error) {
+    throw new Error(`Could not initialize session chat: ${describeLauncherError(error)}`);
+  }
 
   return {
     sessionChatId: sessionChat.chatId,
