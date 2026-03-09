@@ -20,6 +20,26 @@ export type { FeishuConfig } from './config.js';
 export { resolveFeishuSessionChatStateFile } from './config.js';
 export { createFeishuClient } from './api.js';
 export {
+  buildFeishuSessionReferenceText,
+  launchFeishuSessionFromPrivateChat,
+} from './launcher.js';
+export type {
+  FeishuLaunchResult,
+  FeishuLauncherClient,
+} from './launcher.js';
+export {
+  beginFeishuDispatch,
+  consumeMirroredFeishuMessageId,
+  markFeishuDispatchMessageEmitted,
+  rememberMirroredFeishuMessageId,
+  resetFeishuLaunchStateForTests,
+} from './launch-state.js';
+export type { FeishuDispatchMessageKind } from './launch-state.js';
+export {
+  buildFeishuSessionChatName,
+  normalizeFeishuSessionPromptPreview,
+} from './naming.js';
+export {
   buildSessionAnchorCard,
   buildSessionControlCard,
   createBackendConfirmationCard,
@@ -86,12 +106,10 @@ export {
   rememberFeishuSessionChat,
   resetFeishuSessionChatsForTests,
   resolveFeishuChatSessionKind,
-  updateFeishuSessionChat,
 } from './session-chat.js';
 export type {
   FeishuChatSessionKind,
   FeishuSessionChatRecord,
-  FeishuSessionChatUpdate,
 } from './session-chat.js';
 
 export type FeishuRuntimeConnection = {

@@ -26,9 +26,13 @@ import {
   findFeishuSessionChatBySourceMessage,
   initializeFeishuSessionChats,
   persistFeishuSessionChats,
-  rememberFeishuSessionChat,
   resolveFeishuChatSessionKind,
 } from './session-chat.js';
+import {
+  rememberMirroredFeishuMessageId,
+  consumeMirroredFeishuMessageId,
+} from './launch-state.js';
+import { launchFeishuSessionFromPrivateChat } from './launcher.js';
 import {
   buildFeishuCardContext,
   drainPendingFeishuAttachments,
@@ -38,10 +42,11 @@ import {
   queuePendingFeishuAttachments,
   resumePendingFeishuRun,
   resolveFeishuMessageRequest,
-  runFeishuConversation,
   type FeishuRuntimeTransport,
   type FeishuTarget,
 } from './runtime.js';
+import { runFeishuSessionFlow } from './session-flow.js';
+import { describeError } from './utils.js';
 
 type FeishuClient = ReturnType<typeof createFeishuClient>;
 
@@ -275,33 +280,6 @@ function createFeishuIngressDeduplicator() {
 
 function resolveSenderOpenId(payload: FeishuMessageReceiveEvent): string | undefined {
   return payload.sender?.sender_id?.open_id;
-}
-
-function buildSessionChatName(messageId: string, prompt: string): string {
-  const promptPreview = prompt.trim().replace(/\s+/g, ' ').slice(0, 40) || 'New session';
-  const suffix = messageId.slice(-4);
-  return `Session · ${promptPreview} · ${suffix}`;
-}
-
-function buildPrivateChatIndexText(options: {
-  sessionChatName: string;
-  sessionChatId: string;
-  promptPreview: string;
-  createdAt: string;
-}): string {
-  return [
-    `Session created: ${options.sessionChatName} (${options.sessionChatId})`,
-    `Prompt: ${options.promptPreview}`,
-    `Created: ${options.createdAt}`,
-  ].join('\n');
-}
-
-function describeError(error: unknown): string {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message.trim();
-  }
-
-  return 'unknown error';
 }
 
 function shouldFallbackToChatSend(error: unknown): boolean {
@@ -546,6 +524,11 @@ export function createFeishuEventRouter(
         chatType: message.chat_type,
       });
 
+      if (sessionKind.kind === 'session-chat' && consumeMirroredFeishuMessageId(message.message_id)) {
+        succeeded = true;
+        return;
+      }
+
       if (sessionKind.kind !== 'session-chat' && !shouldProcessFeishuMessage(message)) {
         succeeded = true;
         return;
@@ -597,86 +580,43 @@ export function createFeishuEventRouter(
           return;
         }
 
-        const sessionChatName = buildSessionChatName(message.message_id, request.prompt);
-        let sessionChat: { chatId: string; name?: string };
         try {
-          sessionChat = await client.createSessionChat({
-            name: sessionChatName,
-            userOpenId: creatorOpenId,
+          const launch = await launchFeishuSessionFromPrivateChat({
+            client,
+            sourceChatId: message.chat_id,
+            sourceMessageId: message.message_id,
+            creatorOpenId,
+            prompt: request.prompt,
+            mode: request.mode,
+            persist: persistFeishuState,
+          });
+          if (launch.mirroredMessageId) {
+            rememberMirroredFeishuMessageId(launch.mirroredMessageId);
+          }
+
+          await runFeishuSessionFlow({
+            conversationId: launch.sessionChatId,
+            target: {
+              chatId: launch.sessionChatId,
+            },
+            prompt: request.prompt,
+            mode: request.mode,
+            transport,
+            defaultCwd: config.claudeCwd,
+            sourceMessageId: message.message_id,
+            attachments: drainPendingFeishuAttachments(message.chat_id),
+            persistState: persistFeishuState,
           });
         } catch (error) {
-          await transport.sendText(target, `Could not create session chat: ${describeError(error)}`);
+          await transport.sendText(target, describeError(error));
           succeeded = true;
           return;
-        }
-
-        const sessionChatRecord = buildFeishuSessionChatRecord({
-          sourceP2pChatId: message.chat_id,
-          sourceMessageId: message.message_id,
-          sessionChatId: sessionChat.chatId,
-          creatorOpenId,
-          prompt: request.prompt,
-        });
-        rememberFeishuSessionChat(sessionChatRecord);
-
-        try {
-          await persistFeishuSessionChats(config.stateFile);
-        } catch (error) {
-          console.warn('[feishu] failed to persist session chat index:', error);
-        }
-
-        try {
-          await client.sendPrivateChatIndexMessage({
-            chatId: message.chat_id,
-            text: buildPrivateChatIndexText({
-              sessionChatName: sessionChat.name ?? sessionChatName,
-              sessionChatId: sessionChat.chatId,
-              promptPreview: sessionChatRecord.promptPreview,
-              createdAt: sessionChatRecord.createdAt,
-            }),
-          });
-        } catch (error) {
-          console.warn('[feishu] failed to send private-chat index message:', error);
-        }
-
-        try {
-          await client.sendMessage({
-            receiveId: sessionChat.chatId,
-            receiveIdType: 'chat_id',
-            msgType: 'text',
-            content: JSON.stringify({ text: request.prompt }),
-          });
-        } catch (error) {
-          await transport.sendText(
-            target,
-            `Session chat created, but the initial prompt could not be posted: ${describeError(error)}`,
-          );
-          succeeded = true;
-          return;
-        }
-
-        const result = await runFeishuConversation({
-          conversationId: sessionChat.chatId,
-          target: {
-            chatId: sessionChat.chatId,
-          },
-          prompt: request.prompt,
-          mode: request.mode,
-          transport,
-          defaultCwd: config.claudeCwd,
-          sourceMessageId: message.message_id,
-          attachments: drainPendingFeishuAttachments(message.chat_id),
-          persistState: persistFeishuState,
-        });
-
-        if (result.kind === 'busy') {
-          await transport.sendText({ chatId: sessionChat.chatId }, 'Conversation is already running.');
         }
         succeeded = true;
         return;
       }
 
-      const result = await runFeishuConversation({
+      await runFeishuSessionFlow({
         conversationId,
         target,
         prompt: request.prompt,
@@ -686,10 +626,6 @@ export function createFeishuEventRouter(
         sourceMessageId: message.message_id,
         persistState: persistFeishuState,
       });
-
-      if (result.kind === 'busy') {
-        await transport.sendText(target, 'Conversation is already running.');
-      }
       succeeded = true;
     } finally {
       dedup.complete(succeeded);
