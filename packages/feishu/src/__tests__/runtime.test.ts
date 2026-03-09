@@ -20,11 +20,7 @@ import {
   conversationBackend,
   conversationMode,
 } from '@agent-im-relay/core';
-import {
-  buildFeishuSessionChatRecord,
-  getFeishuSessionChat,
-  rememberFeishuSessionChat,
-} from '../session-chat.js';
+import { buildFeishuSessionChatRecord, rememberFeishuSessionChat } from '../session-chat.js';
 import {
   FEISHU_NON_SESSION_CONTROL_TEXT,
   buildFeishuSessionControlPanelPayload,
@@ -57,15 +53,7 @@ describe('Feishu runtime', () => {
     coreMocks.runPlatformConversation.mockResolvedValue(true);
   });
 
-  it('publishes the session anchor card before starting the platform run', async () => {
-    rememberFeishuSessionChat(buildFeishuSessionChatRecord({
-      sourceP2pChatId: 'p2p-chat-1',
-      sourceMessageId: 'message-1',
-      sessionChatId: 'conv-1',
-      creatorOpenId: 'ou_user_1',
-      createdAt: '2026-03-08T10:00:00.000Z',
-      prompt: 'ship it',
-    }));
+  it('does not emit startup text or persistent control ui before starting the platform run', async () => {
     const transport = {
       sendText: vi.fn(async () => undefined),
       sendCard: vi.fn(async () => 'anchor-message-1'),
@@ -88,28 +76,10 @@ describe('Feishu runtime', () => {
     });
 
     expect(result).toEqual({ kind: 'started' });
-    expect(transport.sendText).toHaveBeenCalledWith({
-      chatId: 'chat-1',
-      replyToMessageId: 'message-1',
-    }, 'Starting run…');
-    expect(transport.sendCard.mock.invocationCallOrder[0]).toBeLessThan(
-      coreMocks.runPlatformConversation.mock.invocationCallOrder[0]!,
-    );
-    const cardPayload = transport.sendCard.mock.calls[0]?.[1] as Record<string, any>;
-    const markdownTexts = cardPayload.body.elements
-      .filter((element: Record<string, unknown>) => element.tag === 'markdown')
-      .map((element: Record<string, any>) => element.content);
-    const buttonTexts = cardPayload.body.elements
-      .filter((element: Record<string, unknown>) => element.tag === 'button')
-      .map((button: Record<string, any>) => button.text.content);
-    expect(markdownTexts).toContain('Use the bot menu for session controls. This card is a fallback if the menu is unavailable.');
-    expect(buttonTexts).toEqual(['Fallback Controls', 'Interrupt']);
-    expect(getFeishuSessionChat('conv-1')).toEqual(expect.objectContaining({
-      anchorMessageId: 'anchor-message-1',
-      lastRunStatus: 'idle',
-    }));
-    expect(transport.updateCard).toHaveBeenCalledOnce();
-    expect(persistState).toHaveBeenCalledTimes(2);
+    expect(transport.sendText).not.toHaveBeenCalledWith(expect.anything(), 'Starting run…');
+    expect(transport.sendCard).not.toHaveBeenCalled();
+    expect(transport.updateCard).not.toHaveBeenCalled();
+    expect(persistState).not.toHaveBeenCalled();
   });
 
   it('does not send environment summary on sticky-session resumes', async () => {
@@ -224,7 +194,7 @@ describe('Feishu runtime', () => {
     }));
   });
 
-  it('does not send another anchor card when the session chat already has one', async () => {
+  it('does not send persistent control ui for known session chats', async () => {
     rememberFeishuSessionChat({
       ...buildFeishuSessionChatRecord({
         sourceP2pChatId: 'p2p-chat-1',
@@ -255,7 +225,7 @@ describe('Feishu runtime', () => {
     });
 
     expect(transport.sendCard).not.toHaveBeenCalled();
-    expect(transport.updateCard).toHaveBeenCalledTimes(2);
+    expect(transport.updateCard).not.toHaveBeenCalled();
   });
 
   it('uses the same expanded control-panel payload for anchor and menu entry points', async () => {
@@ -328,8 +298,7 @@ describe('Feishu runtime', () => {
     expect(isFeishuDoneCommand('implement /done support')).toBe(false);
   });
 
-  it('continues the run when startup notifications fail to send', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  it('continues the run without depending on startup notifications', async () => {
     const transport = {
       sendText: vi.fn(async () => {
         throw new Error('Feishu send message failed with HTTP 400.');
@@ -357,12 +326,11 @@ describe('Feishu runtime', () => {
       conversationId: 'session-chat-1',
       prompt: 'follow up',
     }));
-    expect(warn).toHaveBeenCalled();
-
-    warn.mockRestore();
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(transport.sendCard).not.toHaveBeenCalled();
   });
 
-  it('falls back to sending a replacement anchor when in-place update fails', async () => {
+  it('does not attempt anchor recovery for existing session chat metadata', async () => {
     rememberFeishuSessionChat({
       ...buildFeishuSessionChatRecord({
         sourceP2pChatId: 'p2p-chat-1',
@@ -377,9 +345,7 @@ describe('Feishu runtime', () => {
     const transport = {
       sendText: vi.fn(async () => undefined),
       sendCard: vi.fn(async () => 'anchor-message-2'),
-      updateCard: vi.fn(async () => {
-        throw new Error('Feishu update card message failed with HTTP 400.');
-      }),
+      updateCard: vi.fn(async () => undefined),
       uploadFile: vi.fn(async () => undefined),
     };
     const persistState = vi.fn(async () => undefined);
@@ -396,16 +362,12 @@ describe('Feishu runtime', () => {
       persistState,
     });
 
-    expect(transport.updateCard).toHaveBeenCalled();
-    expect(transport.sendCard).toHaveBeenCalled();
-    expect(getFeishuSessionChat('session-chat-2')).toEqual(expect.objectContaining({
-      anchorMessageId: 'anchor-message-2',
-      lastRunStatus: 'idle',
-    }));
-    expect(persistState).toHaveBeenCalled();
+    expect(transport.updateCard).not.toHaveBeenCalled();
+    expect(transport.sendCard).not.toHaveBeenCalled();
+    expect(persistState).not.toHaveBeenCalled();
   });
 
-  it('refreshes the anchor summary after control changes', async () => {
+  it('does not refresh persistent summaries after control changes', async () => {
     rememberFeishuSessionChat({
       ...buildFeishuSessionChatRecord({
         sourceP2pChatId: 'p2p-chat-1',
@@ -449,10 +411,7 @@ describe('Feishu runtime', () => {
       persist: persistState,
     });
 
-    expect(getFeishuSessionChat('session-chat-3')).toEqual(expect.objectContaining({
-      lastKnownBackend: 'codex',
-      lastRunStatus: 'idle',
-    }));
-    expect(transport.updateCard).toHaveBeenCalledOnce();
+    expect(transport.updateCard).not.toHaveBeenCalled();
+    expect(transport.sendCard).not.toHaveBeenCalled();
   });
 });
