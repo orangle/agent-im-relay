@@ -83,5 +83,5 @@ export async function applySetupResult(
   if (result.cwd) {
     conversationCwd.set(threadId, result.cwd);
   }
-  void persistState();
+  void persistState('discord');
 }

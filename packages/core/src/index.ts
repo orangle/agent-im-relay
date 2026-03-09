@@ -142,3 +142,5 @@ export { applyCoreConfigEnvironment } from './config.js';
 export type { CoreConfig } from './config.js';
 export { resolveRelayHomeDir, resolveRelayPaths } from './paths.js';
 export type { RelayPaths } from './paths.js';
+export { relayPlatforms, isRelayPlatform, inferRelayPlatformFromConversationId } from './relay-platform.js';
+export type { RelayPlatform } from './relay-platform.js';

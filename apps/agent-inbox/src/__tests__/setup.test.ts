@@ -13,6 +13,10 @@ vi.mock('@clack/prompts', () => {
       const val = responses[callIndex++];
       return val === '' && opts?.defaultValue ? opts.defaultValue : val;
     }),
+    password: vi.fn(async (opts: { defaultValue?: string }) => {
+      const val = responses[callIndex++];
+      return val === '' && opts?.defaultValue ? opts.defaultValue : val;
+    }),
     group: vi.fn(async (prompts: Record<string, () => Promise<unknown>>) => {
       const result: Record<string, unknown> = {};
       for (const [key, fn] of Object.entries(prompts)) {
@@ -60,5 +64,47 @@ describe('setup flow', () => {
 
     const saved = await readFile(paths.configFile, 'utf-8');
     expect(saved).toContain('"id":"discord"');
+  });
+
+  it('uses a masked prompt for the discord bot token', async () => {
+    const tempHome = await mkdtemp(join('/tmp', 'agent-inbox-setup-'));
+    const paths = resolveRelayPaths(tempHome);
+
+    (prompts as any).__setResponses([
+      'secret-token',
+      'client-id',
+      '',
+    ]);
+
+    await runSetup(paths, ['discord']);
+
+    expect((prompts as any).password).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Discord bot token' }),
+    );
+  });
+
+  it('uses masked prompts for feishu secret fields', async () => {
+    const tempHome = await mkdtemp(join('/tmp', 'agent-inbox-setup-'));
+    const paths = resolveRelayPaths(tempHome);
+
+    (prompts as any).__setResponses([
+      'app-id',
+      'app-secret',
+      'verify-token',
+      'encrypt-key',
+      '3001',
+    ]);
+
+    await runSetup(paths, ['feishu']);
+
+    expect((prompts as any).password).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Feishu app secret' }),
+    );
+    expect((prompts as any).password).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Verification token (optional)' }),
+    );
+    expect((prompts as any).password).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Encrypt key (optional)' }),
+    );
   });
 });

@@ -37,6 +37,10 @@ export function hasOpenStickyThreadSession(conversationId: string): boolean {
   return threadSessionBindings.has(conversationId);
 }
 
+async function persistDiscordState(): Promise<void> {
+  await persistState('discord');
+}
+
 export async function runMentionConversation(
   thread: AnyThreadChannel & StreamTargetChannel,
   prompt: string,
@@ -56,7 +60,7 @@ export async function runMentionConversation(
     backend: options.backend ?? conversationBackend.get(thread.id),
     defaultCwd: config.claudeCwd,
     createSessionId: options.createSessionId ?? (() => randomUUID()),
-    persist: options.persist ?? persistState,
+    persist: options.persist ?? persistDiscordState,
     attachments: options.attachments ?? [],
     render: ({ target, showEnvironment }, events) =>
       (options.streamToDiscord ?? streamAgentToDiscord)({ channel: target, showEnvironment }, events),

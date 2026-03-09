@@ -26,7 +26,7 @@ async function buildDiscordRecord(): Promise<DiscordImRecord> {
   const result = await p.group(
     {
       token: () =>
-        p.text({
+        p.password({
           message: 'Discord bot token',
           validate: v => (v.length === 0 ? 'Required' : undefined),
         }),
@@ -77,17 +77,17 @@ async function buildFeishuRecord(): Promise<FeishuImRecord> {
           validate: v => (v.length === 0 ? 'Required' : undefined),
         }),
       appSecret: () =>
-        p.text({
+        p.password({
           message: 'Feishu app secret',
           validate: v => (v.length === 0 ? 'Required' : undefined),
         }),
       verificationToken: () =>
-        p.text({
+        p.password({
           message: 'Verification token (optional)',
           defaultValue: '',
         }),
       encryptKey: () =>
-        p.text({
+        p.password({
           message: 'Encrypt key (optional)',
           defaultValue: '',
         }),

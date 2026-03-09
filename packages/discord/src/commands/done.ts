@@ -19,7 +19,7 @@ export async function handleDoneCommand(interaction: ChatInputCommandInteraction
   });
 
   if (result.persist) {
-    void core.persistState();
+    void core.persistState('discord');
   }
 
   if (result.clearContinuation) {

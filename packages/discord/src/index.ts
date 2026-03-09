@@ -123,7 +123,7 @@ async function runThreadConversation(
 ): Promise<boolean> {
   return runMentionConversation(thread as AnyThreadChannel & StreamTargetChannel, prompt, triggerMsg, {
     attachments: collectMessageAttachments(triggerMsg),
-    persist: persistState,
+    persist: () => persistState('discord'),
     setReaction,
   });
 }
@@ -279,7 +279,7 @@ export async function startDiscordRuntime(): Promise<Client> {
   registerProcessHandlers();
 
   if (!initialized) {
-    await initState();
+    await initState('discord');
     initialized = true;
   }
 
