@@ -11,6 +11,7 @@
     "dev:discord": "pnpm --filter @agent-im-relay/discord dev",
     "dev:feishu": "pnpm --filter @agent-im-relay/feishu dev"
   },
+  "packageManager": "pnpm@10.13.1",
   "engines": {
     "node": ">=20"
   }
