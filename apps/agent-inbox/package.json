@@ -1,5 +1,5 @@
 {
-  "name": "agent-inbox",
+  "name": "@doctorwu/agent-inbox",
   "version": "1.0.2",
   "type": "module",
   "main": "dist/index.mjs",
