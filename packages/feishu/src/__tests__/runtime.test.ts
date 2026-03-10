@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const coreMocks = vi.hoisted(() => ({
   applySessionControlCommand: vi.fn(),
   evaluateConversationRunRequest: vi.fn(),
+  getAvailableBackendNames: vi.fn(async () => ['claude', 'opencode']),
   runPlatformConversation: vi.fn(),
 }));
 
@@ -12,6 +13,7 @@ vi.mock('@agent-im-relay/core', async (importOriginal) => {
     ...actual,
     applySessionControlCommand: coreMocks.applySessionControlCommand,
     evaluateConversationRunRequest: coreMocks.evaluateConversationRunRequest,
+    getAvailableBackendNames: coreMocks.getAvailableBackendNames,
     runPlatformConversation: coreMocks.runPlatformConversation,
   };
 });
@@ -43,6 +45,7 @@ describe('Feishu runtime', () => {
     conversationMode.clear();
     coreMocks.applySessionControlCommand.mockReset();
     coreMocks.evaluateConversationRunRequest.mockReset();
+    coreMocks.getAvailableBackendNames.mockResolvedValue(['claude', 'opencode']);
     coreMocks.runPlatformConversation.mockReset();
 
     coreMocks.evaluateConversationRunRequest.mockReturnValue({
@@ -194,6 +197,72 @@ describe('Feishu runtime', () => {
     }));
   });
 
+  it('returns an error when backend selection is required but no backends are available', async () => {
+    coreMocks.evaluateConversationRunRequest.mockReturnValueOnce({
+      kind: 'setup-required',
+      conversationId: 'conv-empty',
+      reason: 'backend-selection',
+    });
+    coreMocks.getAvailableBackendNames.mockResolvedValueOnce([]);
+
+    const transport = {
+      sendText: vi.fn(async () => undefined),
+      sendCard: vi.fn(async () => undefined),
+      updateCard: vi.fn(async () => undefined),
+      uploadFile: vi.fn(async () => undefined),
+    };
+
+    await expect(runFeishuConversation({
+      conversationId: 'conv-empty',
+      target: {
+        chatId: 'chat-1',
+      },
+      prompt: 'ship it',
+      mode: 'code',
+      transport,
+      defaultCwd: process.cwd(),
+    })).resolves.toEqual({ kind: 'error' });
+
+    expect(transport.sendText).toHaveBeenCalledWith({
+      chatId: 'chat-1',
+    }, 'No available backends detected.');
+    expect(transport.sendCard).not.toHaveBeenCalled();
+    expect(coreMocks.runPlatformConversation).not.toHaveBeenCalled();
+  });
+
+  it('builds the session control panel from currently available backends', async () => {
+    const transport = {
+      sendText: vi.fn(async () => undefined),
+      sendCard: vi.fn(async () => undefined),
+      updateCard: vi.fn(async () => undefined),
+      uploadFile: vi.fn(async () => undefined),
+    };
+
+    await openFeishuSessionControlPanel({
+      conversationId: 'session-chat-1',
+      target: {
+        chatId: 'session-chat-1',
+      },
+      transport,
+    });
+
+    const cardPayload = transport.sendCard.mock.calls[0]?.[1] as Record<string, any>;
+    const buttonTexts = cardPayload.body.elements
+      .filter((element: Record<string, unknown>) => element.tag === 'button')
+      .map((button: Record<string, any>) => button.text.content);
+
+    expect(buttonTexts).toEqual([
+      'Done',
+      'Claude',
+      'OpenCode',
+      'Claude 3.7',
+      'GPT-5 Codex',
+      'Low',
+      'Medium',
+      'High',
+    ]);
+  });
+
   it('does not send persistent control ui for known session chats', async () => {
     rememberFeishuSessionChat(buildFeishuSessionChatRecord({
       sourceP2pChatId: 'p2p-chat-1',
@@ -261,7 +330,7 @@ describe('Feishu runtime', () => {
       buildFeishuSessionControlPanelPayload('session-chat-1', {
         conversationId: 'session-chat-1',
         chatId: 'session-chat-1',
-      }),
+      }, ['claude', 'opencode']),
     );
     expect(transport.sendCard.mock.calls[1]?.[1]).toEqual(transport.sendCard.mock.calls[0]?.[1]);
   });
