@@ -1,20 +1,24 @@
 import {
   applySessionControlCommand,
   conversationBackend,
+  conversationModels,
   conversationMode,
   evaluateConversationRunRequest,
+  getAvailableBackendCapabilities,
   getAvailableBackendNames,
   runPlatformConversation,
   type AgentStreamEvent,
+  type BackendModel,
   type BackendName,
   type RemoteAttachmentLike,
   type SessionControlCommand,
   type SessionControlResult,
 } from '@agent-im-relay/core';
 import {
-  buildFeishuBackendConfirmationCardPayload,
   buildFeishuBackendSelectionCardPayload,
+  buildFeishuModelSelectionCardPayload,
   buildFeishuSessionControlPanelPayload,
+  buildModelSelectionCard,
   buildSessionControlCard,
   createBackendConfirmationCard,
   createBackendSelectionCard,
@@ -22,6 +26,7 @@ import {
   type BackendConfirmationCard,
   type BackendSelectionCard,
   FeishuCardContext,
+  type ModelSelectionCard,
 } from './cards.js';
 import { parseAskCommand } from './commands/ask.js';
 import { getFeishuSessionChat } from './session-chat.js';
@@ -51,11 +56,50 @@ export type FeishuRuntimeTransport = {
 const pendingAttachments = new Map<string, RemoteAttachmentLike[]>();
 const pendingRuns = new Map<string, PendingFeishuRun>();
 
+async function resolveFeishuCapabilities(
+  conversationId: string,
+): Promise<{ backends: BackendName[]; models: BackendModel[] }> {
+  const capabilities = await getAvailableBackendCapabilities();
+  const currentBackend = conversationBackend.get(conversationId);
+  return {
+    backends: capabilities.map(capability => capability.name),
+    models: capabilities.find(capability => capability.name === currentBackend)?.models ?? [],
+  };
+}
+
+async function getBackendModels(backend: BackendName): Promise<BackendModel[]> {
+  const capabilities = await getAvailableBackendCapabilities();
+  return capabilities.find(capability => capability.name === backend)?.models ?? [];
+}
+
+async function getRequiredModelSelectionCard(
+  conversationId: string,
+  backend: BackendName | undefined,
+): Promise<ModelSelectionCard | null> {
+  if (!backend) {
+    return null;
+  }
+
+  const models = await getBackendModels(backend);
+  const selectedModel = conversationModels.get(conversationId);
+  const requiresModelSelection = models.length > 0
+    && (!selectedModel || !models.some(model => model.id === selectedModel));
+
+  return requiresModelSelection
+    ? buildModelSelectionCard(conversationId, backend, models)
+    : null;
+}
+
 export type FeishuRunGateResult =
   | {
     kind: 'blocked';
     reason: 'backend-selection';
     card: BackendSelectionCard;
+  }
+  | {
+    kind: 'blocked';
+    reason: 'model-selection';
+    card: ModelSelectionCard;
   }
   | {
     kind: 'unavailable';
@@ -106,6 +150,18 @@ export async function beginFeishuConversationRun(
       kind: 'blocked',
       reason: 'backend-selection',
       card: createBackendSelectionCard(options.conversationId, options.prompt, availableBackends),
+    };
+  }
+
+  const modelSelectionCard = await getRequiredModelSelectionCard(
+    options.conversationId,
+    evaluation.backend,
+  );
+  if (modelSelectionCard) {
+    return {
+      kind: 'blocked',
+      reason: 'model-selection',
+      card: modelSelectionCard,
     };
   }
 
@@ -191,13 +247,14 @@ export async function openFeishuSessionControlPanel(options: {
   }
 
   const conversationId = sessionChat?.sessionChatId ?? options.conversationId;
-  const availableBackends = await getAvailableBackendNames();
+  const capabilities = await resolveFeishuCapabilities(conversationId);
   await options.transport.sendCard(
     options.target,
     buildFeishuSessionControlPanelPayload(
       conversationId,
       buildFeishuCardContext(conversationId, options.target),
-      availableBackends,
+      capabilities.backends,
+      capabilities.models,
     ),
   );
   return { kind: 'opened' };
@@ -343,15 +400,15 @@ export async function runFeishuConversation(options: {
       attachments: mergedAttachments,
       attachmentFetchImpl: options.attachmentFetchImpl,
     });
+    const context = buildFeishuCardContext(options.conversationId, options.target, {
+      prompt: options.prompt,
+      mode: options.mode,
+    });
     await options.transport.sendCard(
       options.target,
-      buildFeishuBackendSelectionCardPayload(
-        gate.card,
-        buildFeishuCardContext(options.conversationId, options.target, {
-          prompt: options.prompt,
-          mode: options.mode,
-        }),
-      ),
+      gate.reason === 'backend-selection'
+        ? buildFeishuBackendSelectionCardPayload(gate.card, context)
+        : buildFeishuModelSelectionCardPayload(gate.card, context),
     );
     return { kind: 'blocked' };
   }
@@ -409,6 +466,23 @@ export async function resumePendingFeishuRun(options: {
     return { kind: 'none' };
   }
 
+  const backend = conversationBackend.get(options.conversationId);
+  const modelSelectionCard = await getRequiredModelSelectionCard(options.conversationId, backend);
+  if (modelSelectionCard) {
+    storePendingFeishuRun(run);
+    await options.transport.sendCard(
+      run.target,
+      buildFeishuModelSelectionCardPayload(
+        modelSelectionCard,
+        buildFeishuCardContext(options.conversationId, run.target, {
+          prompt: run.prompt,
+          mode: run.mode,
+        }),
+      ),
+    );
+    return { kind: 'blocked' };
+  }
+
   return runFeishuConversation({
     conversationId: run.conversationId,
     target: run.target,
@@ -444,6 +518,22 @@ export async function handleFeishuControlAction(options: {
 
   if (result.persist) {
     await options.persist?.();
+  }
+
+  if (
+    (result.summaryKey === 'backend.updated' && (result.kind === 'backend' || result.kind === 'confirm-backend'))
+    || result.summaryKey === 'model.updated'
+  ) {
+    const capabilities = await resolveFeishuCapabilities(result.conversationId);
+    await options.transport.sendCard(
+      options.target,
+      buildFeishuSessionControlPanelPayload(
+        result.conversationId,
+        buildFeishuCardContext(result.conversationId, options.target),
+        capabilities.backends,
+        capabilities.models,
+      ),
+    );
   }
 
   const text = (() => {
