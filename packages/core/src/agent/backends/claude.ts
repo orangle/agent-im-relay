@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { config } from '../../config.js';
 import {
   isBackendCommandAvailable,
@@ -206,7 +206,7 @@ function toErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function readClaudeModelFile(path: string): BackendModel[] {
+function readClaudeConfiguredModels(path: string): BackendModel[] {
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as { model?: string };
     return typeof raw.model === 'string'
@@ -218,10 +218,16 @@ function readClaudeModelFile(path: string): BackendModel[] {
 }
 
 function getSupportedClaudeModels(): BackendModel[] {
+  const aliases = ['sonnet', 'opus', 'haiku', 'sonnet1m'].map(model => ({
+    id: model,
+    label: model,
+  }));
   const base = join(homedir(), '.claude');
+
   return [
-    ...readClaudeModelFile(join(base, 'settings.json')),
-    ...readClaudeModelFile(join(base, 'settings copy.json')),
+    ...aliases,
+    ...readClaudeConfiguredModels(join(base, 'settings.json')),
+    ...readClaudeConfiguredModels(join(base, 'settings copy.json')),
   ];
 }
 
@@ -343,7 +349,7 @@ async function* streamClaude(options: AgentSessionOptions): AsyncGenerator<Agent
 export const claudeBackend: AgentBackend = {
   name: 'claude',
   isAvailable: () => isBackendCommandAvailable(config.claudeBin),
-  getSupportedModels: getSupportedClaudeModels,
+  listModels: getSupportedClaudeModels,
   stream: streamClaude,
 };
 

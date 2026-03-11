@@ -24,7 +24,7 @@ function createBackend(events: Array<unknown>): AgentBackend {
   return {
     name: 'claude',
     isAvailable: () => true,
-    getSupportedModels: () => [],
+    listModels: () => [],
     async *stream(options) {
       for (const event of events) {
         if (options.abortSignal?.aborted) {
@@ -45,7 +45,7 @@ function registerTestBackend(
   registerBackend({
     name,
     isAvailable: () => true,
-    getSupportedModels: () => models.map(model => ({ id: model, label: model })),
+    listModels: () => models.map(model => ({ id: model, label: model })),
     async *stream() {
       yield { type: 'done', result: `${name}:ok` } as const;
     },
@@ -220,6 +220,69 @@ describe('session control controller', () => {
       backend: 'codex',
     });
     expect(conversationBackend.get('conv-new-backend')).toBe('codex');
+  });
+
+  it('migrates legacy OpenCode models when re-selecting the same backend', () => {
+    conversationBackend.set('conv-opencode-refresh', 'opencode');
+    conversationModels.set('conv-opencode-refresh', 'gpt-5');
+    resetBackendRegistryForTests();
+    registerTestBackend('opencode', ['openai/gpt-5']);
+
+    expect(applySessionControlCommand({
+      conversationId: 'conv-opencode-refresh',
+      type: 'backend',
+      value: 'opencode',
+    })).toEqual({
+      kind: 'backend',
+      conversationId: 'conv-opencode-refresh',
+      stateChanged: true,
+      persist: true,
+      clearContinuation: false,
+      requiresConfirmation: false,
+      summaryKey: 'backend.updated',
+      backend: 'opencode',
+    });
+    expect(conversationModels.get('conv-opencode-refresh')).toBe('openai/gpt-5');
+  });
+
+  it('clears stale models when switching to a new backend instead of applying legacy suffix migration', () => {
+    conversationBackend.set('conv-opencode-switch', 'codex');
+    conversationModels.set('conv-opencode-switch', 'gpt-5');
+    resetBackendRegistryForTests();
+    registerTestBackend('codex', ['gpt-5']);
+    registerTestBackend('opencode', ['openai/gpt-5']);
+
+    expect(applySessionControlCommand({
+      conversationId: 'conv-opencode-switch',
+      type: 'backend',
+      value: 'opencode',
+    })).toEqual({
+      kind: 'backend',
+      conversationId: 'conv-opencode-switch',
+      stateChanged: true,
+      persist: false,
+      clearContinuation: false,
+      requiresConfirmation: true,
+      summaryKey: 'backend.confirm',
+      currentBackend: 'codex',
+      requestedBackend: 'opencode',
+    });
+
+    expect(applySessionControlCommand({
+      conversationId: 'conv-opencode-switch',
+      type: 'confirm-backend',
+      value: 'opencode',
+    })).toEqual({
+      kind: 'confirm-backend',
+      conversationId: 'conv-opencode-switch',
+      backend: 'opencode',
+      stateChanged: true,
+      persist: true,
+      clearContinuation: false,
+      requiresConfirmation: false,
+      summaryKey: 'backend.updated',
+    });
+    expect(conversationModels.has('conv-opencode-switch')).toBe(false);
   });
 
   it('confirms a pending backend switch and clears continuation state', () => {

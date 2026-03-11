@@ -3,9 +3,11 @@ import {
   getAvailableBackendCapabilities,
   getAvailableBackendNames,
   getRegisteredBackendNames,
+  isBackendModelSupported,
   isRegisteredBackendName,
   registerBackend,
   resetBackendRegistryForTests,
+  resolveBackendModelId,
   type AgentBackend,
 } from '../backend.js';
 
@@ -17,7 +19,7 @@ function createBackend(
   return {
     name,
     isAvailable: () => available,
-    getSupportedModels: () => models,
+    listModels: () => models,
     async *stream() {
       yield { type: 'done', result: `${name}:ok` } as const;
     },
@@ -62,5 +64,28 @@ describe('backend registry', () => {
         ],
       },
     ]);
+  });
+
+  it('resolves legacy OpenCode model ids by unique suffix even when they already contain slashes', () => {
+    registerBackend(createBackend('opencode', true, [
+      { id: 'openrouter/anthropic/claude-3.7-sonnet', label: 'openrouter/anthropic/claude-3.7-sonnet' },
+    ]));
+
+    expect(resolveBackendModelId('opencode', 'anthropic/claude-3.7-sonnet')).toBe(
+      'openrouter/anthropic/claude-3.7-sonnet',
+    );
+  });
+
+  it('preserves only known Claude concrete model id patterns via compatibility resolution', () => {
+    registerBackend(createBackend('claude', true, [
+      { id: 'sonnet', label: 'Sonnet' },
+      { id: 'opus', label: 'Opus' },
+    ]));
+
+    expect(resolveBackendModelId('claude', 'claude-sonnet-4-5')).toBe('claude-sonnet-4-5');
+    expect(resolveBackendModelId('claude', 'claude-opuz-4-5')).toBeUndefined();
+    expect(isBackendModelSupported('claude', 'claude-sonnet-4-5')).toBe(false);
+    expect(isBackendModelSupported('claude', 'claude-sonnet-4-5', { allowCompatibility: true })).toBe(true);
+    expect(isBackendModelSupported('claude', 'claude-opuz-4-5', { allowCompatibility: true })).toBe(false);
   });
 });

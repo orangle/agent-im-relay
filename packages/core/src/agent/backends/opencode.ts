@@ -158,19 +158,20 @@ function getSupportedOpencodeModels(): BackendModel[] {
       model?: string;
     };
 
-    const discovered = Object.values(raw.provider ?? {}).flatMap((provider) => {
+    const discovered = Object.entries(raw.provider ?? {}).flatMap(([providerName, provider]) => {
       if (!provider.models || typeof provider.models !== 'object') {
         return [];
       }
 
-      return Object.entries(provider.models).flatMap(([id, model]) => {
-        if (!id) {
+      return Object.keys(provider.models).flatMap((modelKey) => {
+        if (!providerName || !modelKey) {
           return [];
         }
 
+        const id = `${providerName}/${modelKey}`;
         return [{
           id,
-          label: typeof model?.name === 'string' ? model.name : id,
+          label: id,
         }];
       });
     });
@@ -332,7 +333,7 @@ async function* streamOpencode(options: AgentSessionOptions): AsyncGenerator<Age
 export const opencodeBackend: AgentBackend = {
   name: 'opencode',
   isAvailable: () => isBackendCommandAvailable(config.opencodeBin),
-  getSupportedModels: getSupportedOpencodeModels,
+  listModels: getSupportedOpencodeModels,
   stream: streamOpencode,
 };
 
