@@ -16,6 +16,20 @@ function optionalEnv(env: NodeJS.ProcessEnv, key: string): string | undefined {
   return env[key]?.trim() || undefined;
 }
 
+function numberEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid numeric environment variable: ${key}`);
+  }
+
+  return parsed;
+}
+
 function setOptionalEnv(key: string, value: string | undefined): void {
   if (value) {
     process.env[key] = value;
@@ -31,10 +45,17 @@ export interface FeishuConfig extends CoreConfig {
   feishuEncryptKey?: string;
   feishuVerificationToken?: string;
   feishuBaseUrl: string;
+  feishuModelSelectionTimeoutMs: number;
 }
 
 export function resolveFeishuSessionChatStateFile(stateFile: string): string {
   return join(dirname(stateFile), 'feishu-session-chats.json');
+}
+
+export function resolveFeishuModelSelectionTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return numberEnv(env, 'FEISHU_MODEL_SELECTION_TIMEOUT_MS', 10_000);
 }
 
 export function readFeishuConfig(env: NodeJS.ProcessEnv = process.env): FeishuConfig {
@@ -45,6 +66,7 @@ export function readFeishuConfig(env: NodeJS.ProcessEnv = process.env): FeishuCo
     feishuEncryptKey: optionalEnv(env, 'FEISHU_ENCRYPT_KEY'),
     feishuVerificationToken: optionalEnv(env, 'FEISHU_VERIFICATION_TOKEN'),
     feishuBaseUrl: optionalEnv(env, 'FEISHU_BASE_URL') || 'https://open.feishu.cn',
+    feishuModelSelectionTimeoutMs: resolveFeishuModelSelectionTimeoutMs(env),
   };
 }
 
@@ -55,4 +77,5 @@ export function applyFeishuConfigEnvironment(config: FeishuConfig): void {
   setOptionalEnv('FEISHU_ENCRYPT_KEY', config.feishuEncryptKey);
   setOptionalEnv('FEISHU_VERIFICATION_TOKEN', config.feishuVerificationToken);
   process.env['FEISHU_BASE_URL'] = config.feishuBaseUrl;
+  process.env['FEISHU_MODEL_SELECTION_TIMEOUT_MS'] = String(config.feishuModelSelectionTimeoutMs);
 }
