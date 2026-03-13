@@ -41,6 +41,7 @@ vi.mock('@agent-im-relay/core', async (importOriginal) => {
 
 import {
   conversationBackend,
+  conversationCwd,
   conversationModels,
   conversationMode,
 } from '@agent-im-relay/core';
@@ -67,6 +68,7 @@ afterEach(() => {
 describe('Feishu runtime', () => {
   beforeEach(() => {
     conversationBackend.clear();
+    conversationCwd.clear();
     conversationModels.clear();
     conversationMode.clear();
     coreMocks.applySessionControlCommand.mockReset();
@@ -776,6 +778,45 @@ describe('Feishu runtime', () => {
 
     expect(transport.updateCard).not.toHaveBeenCalled();
     expect(transport.sendCard).not.toHaveBeenCalled();
+  });
+
+  it('clears remembered cwd on done even when no continuation state remains', async () => {
+    conversationCwd.set('session-chat-4', '/tmp/previous-project');
+    coreMocks.applySessionControlCommand.mockReturnValue({
+      kind: 'done',
+      conversationId: 'session-chat-4',
+      stateChanged: false,
+      persist: false,
+      clearContinuation: false,
+      requiresConfirmation: false,
+      summaryKey: 'done.noop',
+    });
+    const transport = {
+      sendText: vi.fn(async () => undefined),
+      sendCard: vi.fn(async () => undefined),
+      updateCard: vi.fn(async () => undefined),
+      uploadFile: vi.fn(async () => undefined),
+    };
+    const persistState = vi.fn(async () => undefined);
+
+    await handleFeishuControlAction({
+      action: {
+        conversationId: 'session-chat-4',
+        type: 'done',
+      },
+      target: {
+        chatId: 'session-chat-4',
+      },
+      transport,
+      persist: persistState,
+    });
+
+    expect(conversationCwd.has('session-chat-4')).toBe(false);
+    expect(persistState).toHaveBeenCalledOnce();
+    expect(transport.sendText).toHaveBeenCalledWith(
+      { chatId: 'session-chat-4' },
+      'No saved continuation to clear.',
+    );
   });
 });
 

@@ -855,7 +855,11 @@ export async function handleFeishuControlAction(options: {
     };
   }
 
-  if (result.persist) {
+  const cwdCleared = options.action.type === 'done'
+    ? conversationCwd.delete(options.action.conversationId)
+    : false;
+
+  if (result.persist || cwdCleared) {
     await options.persist?.();
   }
 
