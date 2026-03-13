@@ -42,6 +42,7 @@ export function applyRuntimeEnvironment(
   delete process.env['FEISHU_ENCRYPT_KEY'];
   delete process.env['FEISHU_BASE_URL'];
   delete process.env['FEISHU_PORT'];
+  delete process.env['FEISHU_AUTHORIZED_OPEN_IDS'];
 
   if (selectedIm.id === 'discord') {
     process.env['DISCORD_TOKEN'] = selectedIm.config.token;
@@ -57,6 +58,7 @@ export function applyRuntimeEnvironment(
   setOptionalEnv('FEISHU_ENCRYPT_KEY', selectedIm.config.encryptKey);
   setOptionalEnv('FEISHU_BASE_URL', selectedIm.config.baseUrl);
   setNumericEnv('FEISHU_PORT', selectedIm.config.port);
+  setOptionalEnv('FEISHU_AUTHORIZED_OPEN_IDS', selectedIm.config.authorizedOpenIds?.join(','));
 }
 
 export async function startSelectedIm(

@@ -1,19 +1,31 @@
-import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readFile, stat, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   applyMessageControlDirectives,
+  ensureConversationArtifactPaths,
+  getConversationArtifactMetadata,
   initState,
+  persistConversationArtifactMetadata,
   persistState,
   preprocessConversationMessage,
   processedEventIds,
   processedMessages,
+  type ArtifactRecord,
   type BackendName,
 } from '@agent-im-relay/core';
 import { createFeishuClient } from './api.js';
 import type { FeishuConfig } from './config.js';
 import {
   buildFeishuBackendConfirmationCardPayload,
+  buildFeishuHelpCardPayload,
 } from './cards.js';
-import { formatFeishuTextMessages } from './formatting.js';
+import {
+  FEISHU_CARD_MAX_COUNT,
+  buildFeishuFileSummaryCardPayload,
+  formatFeishuMarkdownCards,
+  normalizeFeishuMarkdownOutput,
+} from './formatting.js';
 import {
   extractFeishuAttachmentInfos,
   extractFeishuMessageText,
@@ -41,9 +53,14 @@ import { launchFeishuSessionFromPrivateChat } from './launcher.js';
 import {
   buildFeishuCardContext,
   drainPendingFeishuAttachments,
+  executeFeishuResumeCommand,
   handleFeishuControlAction,
+  getFeishuSessionStatus,
+  isFeishuHelpCommand,
   openFeishuSessionControlPanel,
   isFeishuDoneCommand,
+  isFeishuStatusCommand,
+  parseFeishuResumeCommand,
   queuePendingFeishuAttachments,
   resumePendingFeishuRun,
   resolveFeishuMessageRequest,
@@ -93,6 +110,7 @@ export type FeishuCardActionTriggerEvent = {
   open_message_id?: string;
   action?: {
     value?: Record<string, unknown>;
+    form?: Record<string, unknown>;
     tag?: string;
     option?: string;
     timezone?: string;
@@ -112,6 +130,71 @@ export type FeishuMenuActionTriggerEvent = {
   timestamp?: number;
 };
 
+function resolveResumeSessionId(action?: FeishuActionPayload['value']): string | undefined {
+  if (!action) {
+    return undefined;
+  }
+
+  const direct = typeof action.sessionId === 'string' ? action.sessionId : undefined;
+  const legacy = typeof action.session_id === 'string' ? action.session_id : undefined;
+  const formValue = (() => {
+    const form = (action as { form?: Record<string, unknown> }).form;
+    if (!form) {
+      return undefined;
+    }
+    const directValue = typeof form.sessionId === 'string' ? form.sessionId : undefined;
+    const legacyValue = typeof form.session_id === 'string' ? form.session_id : undefined;
+    if (directValue || legacyValue) {
+      return directValue ?? legacyValue;
+    }
+
+    const entries = Object.values(form).filter(value => typeof value === 'string') as string[];
+    if (entries.length === 1) {
+      return entries[0];
+    }
+
+    return undefined;
+  })();
+  const raw = direct ?? legacy ?? formValue;
+  if (!raw) {
+    return undefined;
+  }
+
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function buildFeishuStatusText(conversationId: string): string {
+  const status = getFeishuSessionStatus(conversationId);
+  const lines = [
+    '**会话状态信息**',
+    '',
+    `• Conversation ID: \`${conversationId}\``,
+  ];
+
+  if (status.sessionId) {
+    lines.push(`• Session ID: \`${status.sessionId}\``);
+  }
+  if (status.backend) {
+    lines.push(`• Backend: ${status.backend}`);
+  }
+  if (status.model) {
+    lines.push(`• Model: ${status.model}`);
+  }
+  if (status.effort) {
+    lines.push(`• Effort: ${status.effort}`);
+  }
+  if (status.cwd) {
+    lines.push(`• 当前目录: \`${status.cwd}\``);
+  }
+  if (status.hasBinding) {
+    lines.push(`• Binding 状态: ${status.bindingStatus ?? 'unknown'}`);
+  }
+  lines.push(`• Running: ${status.running ? 'yes' : 'no'}`);
+
+  return lines.join('\n');
+}
+
 type RouterDependencies = {
   client?: FeishuClient;
   readFileImpl?: typeof readFile;
@@ -119,6 +202,24 @@ type RouterDependencies = {
 
 const FEISHU_EVENT_DEDUP_TTL_MS = 5 * 60_000;
 const FEISHU_ACTION_DEDUP_TTL_MS = 5_000;
+const FEISHU_UNAUTHORIZED_TEXT = 'Unauthorized to perform this action.';
+const FEISHU_UNAUTHORIZED_CODE_TEXT = 'Unauthorized to run code tasks. Use /ask for non-tool requests or ask an admin to grant access.';
+
+function isAuthorizationEnabled(config: FeishuConfig): boolean {
+  return Array.isArray(config.feishuAuthorizedOpenIds) && config.feishuAuthorizedOpenIds.length > 0;
+}
+
+function isAuthorizedActor(config: FeishuConfig, openId?: string): boolean {
+  if (!isAuthorizationEnabled(config)) {
+    return true;
+  }
+
+  if (!openId) {
+    return false;
+  }
+
+  return config.feishuAuthorizedOpenIds.includes(openId);
+}
 
 type ProcessedKeyStore = {
   processed: Set<string>;
@@ -317,24 +418,54 @@ function createTransport(
   readFileImpl: typeof readFile,
 ): FeishuRuntimeTransport {
   async function sendText(target: FeishuTarget, content: string): Promise<void> {
-    const messages = formatFeishuTextMessages(content);
+    const normalized = normalizeFeishuMarkdownOutput(content);
+    if (!normalized) {
+      return;
+    }
 
-    for (const message of messages) {
+    const cards = formatFeishuMarkdownCards(normalized);
+    if (cards.length === 0) {
+      return;
+    }
+
+    if (cards.length > FEISHU_CARD_MAX_COUNT) {
+      const { filePath, filename } = await writeLargeOutputFile({
+        conversationId: target.chatId,
+        content: normalized,
+      });
+      const summaryCard = buildFeishuFileSummaryCardPayload({
+        title: '内容较长，已生成文件',
+        intro: '内容较长，已改为文件发送，请查看附件。',
+        files: [filename],
+        note: '如需我拆解重点或转成卡片展示，请告诉我。',
+      });
+
+      await withReplyFallback(
+        target,
+        async () => client.replyMessage({
+          messageId: target.replyToMessageId!,
+          msgType: 'interactive',
+          content: JSON.stringify(summaryCard),
+        }),
+        async () => client.sendCard(target.chatId, summaryCard),
+      );
+
+      await uploadFile(target, filePath);
+      return;
+    }
+
+    for (const card of cards) {
       await withReplyFallback(
         target,
         async () => {
           await client.replyMessage({
             messageId: target.replyToMessageId!,
-            msgType: message.msgType,
-            content: message.content,
+            msgType: 'interactive',
+            content: JSON.stringify(card.card),
           });
         },
         async () => {
-          await client.sendMessage({
-            receiveId: target.chatId,
-            msgType: message.msgType,
-            content: message.content,
-          });
+          await client.sendCard(target.chatId, card.card);
         },
       );
     }
@@ -439,6 +570,37 @@ function buildAttachmentReceiptText(attachments: FeishuAttachmentInfo[]): string
     : 'Attachments received. Send a prompt to use them.';
 }
 
+async function writeLargeOutputFile(options: {
+  conversationId: string;
+  content: string;
+}): Promise<{ filePath: string; filename: string }> {
+  const paths = await ensureConversationArtifactPaths(options.conversationId);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `feishu-output-${timestamp}.md`;
+  const filePath = path.join(paths.outgoingDir, filename);
+
+  await writeFile(filePath, options.content, 'utf8');
+  const storedStats = await stat(filePath);
+  const record: ArtifactRecord = {
+    id: randomUUID(),
+    filename,
+    relativePath: path.join('outgoing', filename),
+    mimeType: 'text/markdown',
+    size: storedStats.size,
+    kind: 'markdown',
+    createdAt: new Date().toISOString(),
+  };
+
+  const existing = await getConversationArtifactMetadata(options.conversationId);
+  await persistConversationArtifactMetadata(options.conversationId, {
+    incoming: existing.incoming,
+    outgoing: [...existing.outgoing, record],
+    lastUpdatedAt: record.createdAt,
+  });
+
+  return { filePath, filename };
+}
+
 export function normalizeFeishuMessageReceiveEvent(payload: FeishuMessageReceiveEvent): FeishuRawEvent {
   return {
     event: {
@@ -457,10 +619,12 @@ export function normalizeFeishuMessageReceiveEvent(payload: FeishuMessageReceive
 
 export function normalizeFeishuCardActionTriggerEvent(payload: FeishuCardActionTriggerEvent): FeishuRawEvent {
   const actionValue = payload.action?.value ?? {};
+  const actionForm = payload.action?.form;
   return {
     action: {
       value: {
         ...actionValue,
+        ...(actionForm ? { form: actionForm } : {}),
         replyToMessageId: typeof actionValue.replyToMessageId === 'string'
           ? actionValue.replyToMessageId
           : payload.open_message_id,
@@ -549,6 +713,7 @@ export function createFeishuEventRouter(
         replyToMessageId: message.message_id,
       };
 
+      const senderOpenId = resolveSenderOpenId(payload);
       const sessionKind = resolveFeishuChatSessionKind({
         chatId: message.chat_id,
         chatType: message.chat_type,
@@ -576,15 +741,17 @@ export function createFeishuEventRouter(
         return;
       }
 
-      const inlineAttachments = attachmentInfos.length > 0
-        ? await buildManagedAttachments(client, message.message_id, attachmentInfos)
-        : [];
-
       const preprocessed = preprocessConversationMessage(messageText);
 
       if (isFeishuDoneCommand(preprocessed.prompt)) {
         if (message.chat_type === 'p2p') {
           await transport.sendText(target, 'Use /done inside the session chat you want to close.');
+          succeeded = true;
+          return;
+        }
+
+        if (isAuthorizationEnabled(config) && !isAuthorizedActor(config, senderOpenId)) {
+          await transport.sendText(target, FEISHU_UNAUTHORIZED_TEXT);
           succeeded = true;
           return;
         }
@@ -602,7 +769,86 @@ export function createFeishuEventRouter(
         return;
       }
 
+      if (isFeishuHelpCommand(preprocessed.prompt)) {
+        await transport.sendCard(
+          target,
+          buildFeishuHelpCardPayload(
+            conversationId,
+            buildFeishuCardContext(conversationId, target),
+          ),
+        );
+        succeeded = true;
+        return;
+      }
+
+      if (isFeishuStatusCommand(preprocessed.prompt)) {
+        await transport.sendText(target, buildFeishuStatusText(conversationId));
+        succeeded = true;
+        return;
+      }
+
+      const resumeCmd = parseFeishuResumeCommand(preprocessed.prompt);
+      if (resumeCmd.isResume) {
+        if (!resumeCmd.sessionId) {
+          await transport.sendText(target, 'Usage: /resume <session_id>');
+          succeeded = true;
+          return;
+        }
+
+        if (sessionKind.kind !== 'session-chat') {
+          await transport.sendText(target, 'Use /resume inside the session chat you want to resume.');
+          succeeded = true;
+          return;
+        }
+
+        if (isAuthorizationEnabled(config) && !isAuthorizedActor(config, senderOpenId)) {
+          await transport.sendText(target, FEISHU_UNAUTHORIZED_TEXT);
+          succeeded = true;
+          return;
+        }
+
+        const result = await executeFeishuResumeCommand(conversationId, resumeCmd.sessionId);
+        await transport.sendText(target, result.message);
+
+        if (result.success) {
+          await persistFeishuState();
+        }
+
+        succeeded = true;
+        return;
+      }
+
       const request = resolveFeishuMessageRequest(preprocessed.prompt);
+
+      const hasRunContent = Boolean(request.prompt) || preprocessed.directives.length > 0;
+      if (
+        hasRunContent
+        && request.mode === 'code'
+        && isAuthorizationEnabled(config)
+        && !isAuthorizedActor(config, senderOpenId)
+      ) {
+        await transport.sendText(target, FEISHU_UNAUTHORIZED_CODE_TEXT);
+        succeeded = true;
+        return;
+      }
+
+      if (
+        hasRunContent
+        && request.mode === 'code'
+        && isAuthorizationEnabled(config)
+        && sessionKind.kind === 'session-chat'
+        && senderOpenId
+        && sessionKind.record.creatorOpenId !== senderOpenId
+      ) {
+        await transport.sendText(target, FEISHU_UNAUTHORIZED_CODE_TEXT);
+        succeeded = true;
+        return;
+      }
+
+      const inlineAttachments = attachmentInfos.length > 0
+        ? await buildManagedAttachments(client, message.message_id, attachmentInfos)
+        : [];
+
       if (message.chat_type === 'p2p') {
         const duplicateSessionChat = findFeishuSessionChatBySourceMessage({
           sourceP2pChatId: message.chat_id,
@@ -613,7 +859,7 @@ export function createFeishuEventRouter(
           return;
         }
 
-        const creatorOpenId = resolveSenderOpenId(payload);
+        const creatorOpenId = senderOpenId;
         if (!creatorOpenId) {
           await transport.sendText(target, 'Could not determine the Feishu user for this private chat.');
           succeeded = true;
@@ -742,6 +988,107 @@ export function createFeishuEventRouter(
           target,
           transport,
         });
+        succeeded = true;
+        return;
+      }
+
+      if (actionType === 'status') {
+        await transport.sendText(target, buildFeishuStatusText(conversationId));
+        succeeded = true;
+        return;
+      }
+
+      if (actionType === 'command') {
+        const commandValue = typeof action.command === 'string' ? action.command.trim().toLowerCase() : '';
+        if (!commandValue) {
+          succeeded = true;
+          return;
+        }
+
+        if (commandValue === 'help') {
+          await transport.sendCard(
+            target,
+            buildFeishuHelpCardPayload(
+              conversationId,
+              buildFeishuCardContext(conversationId, target),
+            ),
+          );
+          succeeded = true;
+          return;
+        }
+
+        if (commandValue === 'status') {
+          await transport.sendText(target, buildFeishuStatusText(conversationId));
+          succeeded = true;
+          return;
+        }
+
+        if (commandValue === 'done') {
+          const sessionKind = resolveFeishuChatSessionKind({ chatId: target.chatId });
+          if (sessionKind.kind !== 'session-chat') {
+            await transport.sendText(target, 'Use /done inside the session chat you want to close.');
+            succeeded = true;
+            return;
+          }
+
+          const actorOpenId = payload.open_id ?? payload.user_id;
+          if (isAuthorizationEnabled(config) && !isAuthorizedActor(config, actorOpenId)) {
+            await transport.sendText(target, FEISHU_UNAUTHORIZED_TEXT);
+            succeeded = true;
+            return;
+          }
+
+          await handleFeishuControlAction({
+            action: {
+              conversationId,
+              type: 'done',
+            },
+            target,
+            transport,
+            persist: persistFeishuState,
+          });
+          succeeded = true;
+          return;
+        }
+
+        succeeded = true;
+        return;
+      }
+
+      if (actionType === 'resume') {
+        const sessionId = resolveResumeSessionId(action);
+        if (!sessionId) {
+          await transport.sendText(target, 'Usage: /resume <session_id>');
+          succeeded = true;
+          return;
+        }
+
+        const sessionKind = resolveFeishuChatSessionKind({ chatId: target.chatId });
+        if (sessionKind.kind !== 'session-chat') {
+          await transport.sendText(target, 'Use /resume inside the session chat you want to resume.');
+          succeeded = true;
+          return;
+        }
+
+        const actorOpenId = payload.open_id ?? payload.user_id;
+        if (isAuthorizationEnabled(config) && !isAuthorizedActor(config, actorOpenId)) {
+          await transport.sendText(target, FEISHU_UNAUTHORIZED_TEXT);
+          succeeded = true;
+          return;
+        }
+
+        const result = await executeFeishuResumeCommand(conversationId, sessionId);
+        await transport.sendText(target, result.message);
+        if (result.success) {
+          await persistFeishuState();
+        }
+        succeeded = true;
+        return;
+      }
+
+      const actorOpenId = payload.open_id ?? payload.user_id;
+      if (isAuthorizationEnabled(config) && !isAuthorizedActor(config, actorOpenId)) {
+        await transport.sendText(target, FEISHU_UNAUTHORIZED_TEXT);
         succeeded = true;
         return;
       }

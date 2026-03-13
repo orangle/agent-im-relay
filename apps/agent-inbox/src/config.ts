@@ -23,6 +23,7 @@ export type FeishuImConfig = {
   encryptKey?: string;
   baseUrl?: string;
   port?: number;
+  authorizedOpenIds?: string[];
 };
 
 export type MetaRecord = {
@@ -73,7 +74,8 @@ export type AvailableIm =
   | {
     id: 'feishu';
     note?: string;
-    config: Required<Pick<FeishuImConfig, 'appId' | 'appSecret'>> & Pick<FeishuImConfig, 'verificationToken' | 'encryptKey' | 'baseUrl' | 'port'>;
+    config: Required<Pick<FeishuImConfig, 'appId' | 'appSecret'>>
+      & Pick<FeishuImConfig, 'verificationToken' | 'encryptKey' | 'baseUrl' | 'port' | 'authorizedOpenIds'>;
   };
 
 export interface LoadedAppConfig {
@@ -196,6 +198,7 @@ function normalizeFeishuImRecord(value: Record<string, unknown>): FeishuImRecord
       encryptKey: asString(config.encryptKey),
       baseUrl: asString(config.baseUrl),
       port: asPositiveNumber(config.port),
+      authorizedOpenIds: asStringList(config.authorizedOpenIds),
     },
   };
 }
@@ -350,6 +353,7 @@ export function resolveAvailableIms(records: AppConfigRecord[]): AvailableIm[] {
         encryptKey: record.config.encryptKey,
         baseUrl: record.config.baseUrl,
         port: record.config.port,
+        authorizedOpenIds: record.config.authorizedOpenIds,
       },
     }];
   });

@@ -1,19 +1,31 @@
+import path from 'node:path';
 import {
   applySessionControlCommand,
+  activeConversations,
+  closeThreadSession,
+  confirmThreadSessionBinding,
   conversationBackend,
+  conversationCwd,
+  conversationEffort,
   conversationModels,
   conversationMode,
+  conversationSessions,
   evaluateConversationRunRequest,
   getAvailableBackendCapabilities,
   getAvailableBackendNames,
+  interruptConversationRun,
+  isConversationRunning,
+  openThreadSessionBinding,
   resolveBackendModelId,
   runPlatformConversation,
+  threadSessionBindings,
   type AgentStreamEvent,
   type BackendModel,
   type BackendName,
   type RemoteAttachmentLike,
   type SessionControlCommand,
   type SessionControlResult,
+  type ThreadNativeSessionStatus,
 } from '@agent-im-relay/core';
 import {
   buildFeishuBackendSelectionCardPayload,
@@ -31,7 +43,33 @@ import {
 } from './cards.js';
 import { parseAskCommand } from './commands/ask.js';
 import { resolveFeishuModelSelectionTimeoutMs } from './config.js';
+import { buildFeishuFileSummaryCardPayload } from './formatting.js';
 import { getFeishuSessionChat } from './session-chat.js';
+
+const FILE_REQUEST_PATTERN = /(?:发送|生成|导出|保存|下载|提供|给我|发我|创建|输出).{0,16}(?:文件|附件|文档|表格|excel|csv|pdf|word|ppt|压缩包)/i;
+const FILE_EXTENSION_PATTERN = /\.(?:xlsx|xls|csv|pdf|docx?|pptx?|zip|rar|7z|md|txt)\b/i;
+const FILE_NEGATION_PATTERN = /不(?:要|用|需要|必|想).{0,8}(?:文件|附件|文档|表格|excel|csv|pdf|word|ppt|压缩包)/i;
+
+function shouldSendArtifactsForPrompt(prompt: string): boolean {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (FILE_NEGATION_PATTERN.test(trimmed)) {
+    return false;
+  }
+
+  if (FILE_EXTENSION_PATTERN.test(trimmed)) {
+    return true;
+  }
+
+  if (/(?:附件|压缩包)/i.test(trimmed)) {
+    return true;
+  }
+
+  return FILE_REQUEST_PATTERN.test(trimmed);
+}
 
 export type FeishuTarget = {
   chatId: string;
@@ -285,6 +323,81 @@ export function resolveFeishuMessageRequest(content: string): {
 
 export function isFeishuDoneCommand(content: string): boolean {
   return content.trim().toLowerCase() === '/done';
+}
+
+export function isFeishuHelpCommand(content: string): boolean {
+  return content.trim().toLowerCase() === '/help';
+}
+
+export function isFeishuStatusCommand(content: string): boolean {
+  return content.trim().toLowerCase() === '/status';
+}
+
+export function parseFeishuResumeCommand(
+  content: string,
+): { isResume: boolean; sessionId?: string } {
+  const trimmed = content.trim();
+  if (!/^\/resume(\s|$)/i.test(trimmed)) {
+    return { isResume: false };
+  }
+
+  const match = /^\/resume\s+(\S+)$/i.exec(trimmed);
+  return { isResume: true, sessionId: match?.[1] };
+}
+
+export type FeishuSessionStatus = {
+  conversationId: string;
+  sessionId?: string;
+  cwd?: string;
+  model?: string;
+  backend?: string;
+  effort?: string;
+  hasBinding: boolean;
+  bindingStatus?: ThreadNativeSessionStatus;
+  running: boolean;
+};
+
+export function getFeishuSessionStatus(conversationId: string): FeishuSessionStatus {
+  const binding = threadSessionBindings.get(conversationId);
+  return {
+    conversationId,
+    sessionId: conversationSessions.get(conversationId),
+    cwd: conversationCwd.get(conversationId),
+    model: conversationModels.get(conversationId),
+    backend: conversationBackend.get(conversationId) ?? binding?.backend,
+    effort: conversationEffort.get(conversationId),
+    hasBinding: Boolean(binding),
+    bindingStatus: binding?.nativeSessionStatus,
+    running: activeConversations.has(conversationId),
+  };
+}
+
+export async function executeFeishuResumeCommand(
+  conversationId: string,
+  targetSessionId: string,
+): Promise<{ success: boolean; message: string }> {
+  const existingBinding = threadSessionBindings.get(conversationId);
+  const backend = conversationBackend.get(conversationId) ?? existingBinding?.backend;
+  if (!backend) {
+    return {
+      success: false,
+      message: 'No backend configured. Use the control panel to select a backend first.',
+    };
+  }
+
+  interruptConversationRun(conversationId);
+  closeThreadSession({ conversationId });
+  openThreadSessionBinding({ conversationId, backend });
+  confirmThreadSessionBinding({ conversationId, nativeSessionId: targetSessionId });
+
+  if (!conversationBackend.get(conversationId)) {
+    conversationBackend.set(conversationId, backend);
+  }
+
+  return {
+    success: true,
+    message: `Closed current session. The next run will resume session: ${targetSessionId}`,
+  };
 }
 
 export async function openFeishuSessionControlPanel(options: {
@@ -576,7 +689,47 @@ export async function runFeishuConversation(options: {
   pendingRuns.delete(options.conversationId);
   rememberFeishuConversationMode(options.conversationId, options.mode);
 
-  const started = await runPlatformConversation({
+  const publishArtifacts = async ({ files, warnings, target }: {
+    files: string[];
+    warnings: string[];
+    target: FeishuTarget;
+  }) => {
+    if (!shouldSendArtifactsForPrompt(options.prompt)) {
+      return;
+    }
+
+    const uploaded: string[] = [];
+    const uploadWarnings = [...warnings];
+
+    for (const filePath of files) {
+      try {
+        await options.transport.uploadFile(target, filePath);
+        uploaded.push(filePath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        uploadWarnings.push(`⚠️ Failed to upload returned file \`${filePath}\`: ${message}`);
+      }
+    }
+
+    if (uploaded.length > 0) {
+      const fileNames = uploaded.map(filePath => path.basename(filePath));
+      await options.transport.sendCard(
+        target,
+        buildFeishuFileSummaryCardPayload({
+          title: '已生成文件',
+          intro: `已按你的要求生成 ${uploaded.length} 个文件，已作为附件发送。`,
+          files: fileNames,
+          note: '如需改为卡片展示或继续拆解，请告诉我。',
+        }),
+      );
+    }
+
+    if (uploadWarnings.length > 0) {
+      await options.transport.sendText(target, uploadWarnings.join('\n'));
+    }
+  };
+
+  let started = await runPlatformConversation({
     conversationId: options.conversationId,
     target: options.target,
     prompt: options.prompt,
@@ -588,16 +741,26 @@ export async function runFeishuConversation(options: {
     attachmentFetchImpl: options.attachmentFetchImpl,
     render: ({ target, showEnvironment }, events) =>
       streamAgentToFeishu(options.transport, target, events, showEnvironment, options.lifecycle),
-    publishArtifacts: async ({ files, warnings, target }) => {
-      for (const filePath of files) {
-        await options.transport.uploadFile(target, filePath);
-      }
-
-      if (warnings.length > 0) {
-        await options.transport.sendText(target, warnings.join('\n'));
-      }
-    },
+    publishArtifacts,
   });
+
+  if (!started && activeConversations.has(options.conversationId) && !isConversationRunning(options.conversationId)) {
+    activeConversations.delete(options.conversationId);
+    started = await runPlatformConversation({
+      conversationId: options.conversationId,
+      target: options.target,
+      prompt: options.prompt,
+      mode: options.mode,
+      sourceMessageId: options.sourceMessageId,
+      backend: gate.backend,
+      defaultCwd: options.defaultCwd,
+      attachments: mergedAttachments,
+      attachmentFetchImpl: options.attachmentFetchImpl,
+      render: ({ target, showEnvironment }, events) =>
+        streamAgentToFeishu(options.transport, target, events, showEnvironment, options.lifecycle),
+      publishArtifacts,
+    });
+  }
 
   if (started) {
     return { kind: 'started' };

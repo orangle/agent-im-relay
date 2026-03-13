@@ -80,6 +80,8 @@ Discord is the recommended platform for the best interactive workflow. It suppor
 
 Create a self-built enterprise application in the [Feishu Open Platform](https://open.feishu.cn), enable long-connection event subscriptions, and obtain the `App ID` and `App Secret`.
 
+For safety, you can restrict code-mode (tool-enabled) execution to specific Feishu users by setting an allowlist of `open_id` values via `authorizedOpenIds` in the Feishu config record (or `FEISHU_AUTHORIZED_OPEN_IDS` when running from `.env`).
+
 ---
 
 ## Supported Agent Backends

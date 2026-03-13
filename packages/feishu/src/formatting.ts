@@ -1,203 +1,342 @@
-export type FeishuFormattedTextMessage = {
-  msgType: 'text' | 'post';
-  content: string;
+import { stripArtifactManifest } from '@agent-im-relay/core';
+
+export type FeishuFormattedCardMessage = {
+  card: Record<string, unknown>;
+  byteLength: number;
 };
 
-const CODE_FENCE_PATTERN = /^```/m;
-const MAX_POST_PARAGRAPHS = 20;
-const MAX_POST_CHARS = 4_000;
-const MAX_PARAGRAPH_CHARS = 900;
+export const FEISHU_CARD_PAYLOAD_LIMIT_BYTES = 24 * 1024;
+export const FEISHU_CARD_MAX_COUNT = 8;
 
-function buildTextMessage(text: string): FeishuFormattedTextMessage {
-  return {
-    msgType: 'text',
-    content: JSON.stringify({ text }),
-  };
-}
+const CODE_FENCE_PATTERN = /^```/;
 
-function buildPostMessage(paragraphs: string[]): FeishuFormattedTextMessage {
-  return {
-    msgType: 'post',
-    content: JSON.stringify({
-      zh_cn: {
-        title: '',
-        content: paragraphs.map(text => [{ tag: 'text', text }]),
-      },
-    }),
-  };
-}
+type MarkdownBlock =
+  | { kind: 'text'; lines: string[] }
+  | { kind: 'code'; language: string; lines: string[] };
 
 function normalizeInput(text: string): string {
-  return text.replace(/\r\n/g, '\n').trim();
+  return stripArtifactManifest(text.replace(/\r\n/g, '\n')).trim();
 }
 
-function isHeadingLine(line: string): boolean {
-  return /^#{1,6}\s+/.test(line);
+export function normalizeFeishuMarkdownOutput(text: string): string {
+  return normalizeInput(text);
 }
 
-function isBulletListLine(line: string): boolean {
-  return /^[-*+]\s+/.test(line);
-}
+function buildMarkdownCard(elements: string[], title?: string): Record<string, unknown> {
+  const body = {
+    elements: elements.map(content => ({
+      tag: 'markdown',
+      content,
+    })),
+  };
 
-function isNumberedListLine(line: string): boolean {
-  return /^\d+\.\s+/.test(line);
-}
-
-function isQuoteLine(line: string): boolean {
-  return /^>\s?/.test(line);
-}
-
-function isLabelLine(line: string): boolean {
-  return !isBulletListLine(line)
-    && !isNumberedListLine(line)
-    && !isQuoteLine(line)
-    && line.length <= 80
-    && /^[^\s].*[:：]$/.test(line);
-}
-
-function emphasizeLabel(text: string): string {
-  const normalized = text
-    .replace(/^#{1,6}\s+/, '')
-    .replace(/[:：]\s*$/, '')
-    .trim();
-  return normalized ? `【${normalized}】` : '';
-}
-
-function normalizeListItem(line: string): string {
-  if (isBulletListLine(line)) {
-    return `• ${line.replace(/^[-*+]\s+/, '').trim()}`;
+  if (!title) {
+    return {
+      schema: '2.0',
+      body,
+    };
   }
 
-  if (isNumberedListLine(line)) {
-    const match = line.match(/^(\d+\.)\s+(.*)$/);
-    if (!match) return line;
-    return `${match[1]} ${match[2].trim()}`;
-  }
-
-  return line;
+  return {
+    schema: '2.0',
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: title,
+      },
+    },
+    body,
+  };
 }
 
-function splitLongParagraph(text: string, maxLength: number): string[] {
-  if (text.length <= maxLength) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > maxLength) {
-    let splitIndex = remaining.lastIndexOf(' ', maxLength);
-    if (splitIndex < Math.floor(maxLength * 0.5)) {
-      splitIndex = maxLength;
-    }
-
-    chunks.push(remaining.slice(0, splitIndex).trim());
-    remaining = remaining.slice(splitIndex).trim();
-  }
-
-  if (remaining) {
-    chunks.push(remaining);
-  }
-
-  return chunks.filter(Boolean);
+function cardByteLength(elements: string[], title?: string): number {
+  return Buffer.byteLength(JSON.stringify(buildMarkdownCard(elements, title)), 'utf8');
 }
 
-function collectParagraphs(text: string): string[] {
-  const paragraphs: string[] = [];
-  const current: string[] = [];
+function buildMarkdownFromBlock(block: MarkdownBlock): string {
+  if (block.kind === 'code') {
+    const fence = block.language ? `\`\`\`${block.language}` : '```';
+    return [fence, ...block.lines, '```'].join('\n');
+  }
+
+  return block.lines.join('\n');
+}
+
+function splitMarkdownBlocks(text: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = [];
   const lines = text.split('\n');
+  let textLines: string[] = [];
+  let inCodeBlock = false;
+  let codeLanguage = '';
+  let codeLines: string[] = [];
 
-  const flushCurrent = () => {
-    if (current.length === 0) {
+  const flushText = () => {
+    if (textLines.length === 0) {
       return;
     }
+    blocks.push({ kind: 'text', lines: textLines });
+    textLines = [];
+  };
 
-    const paragraph = current.join(' ').replace(/\s+/g, ' ').trim();
-    current.length = 0;
-    if (!paragraph) {
+  const flushCode = () => {
+    if (codeLines.length === 0) {
       return;
     }
-
-    paragraphs.push(...splitLongParagraph(paragraph, MAX_PARAGRAPH_CHARS));
+    blocks.push({ kind: 'code', language: codeLanguage, lines: codeLines });
+    codeLines = [];
+    codeLanguage = '';
   };
 
   for (const rawLine of lines) {
-    const line = rawLine.trim();
+    const trimmed = rawLine.trim();
 
-    if (!line) {
-      flushCurrent();
-      continue;
-    }
-
-    if (isHeadingLine(line) || isLabelLine(line)) {
-      flushCurrent();
-      const heading = emphasizeLabel(line);
-      if (heading) {
-        paragraphs.push(heading);
+    if (CODE_FENCE_PATTERN.test(trimmed)) {
+      if (inCodeBlock) {
+        flushCode();
+        inCodeBlock = false;
+      } else {
+        flushText();
+        inCodeBlock = true;
+        codeLanguage = trimmed.replace(CODE_FENCE_PATTERN, '').trim();
+        codeLines = [];
       }
       continue;
     }
 
-    if (isBulletListLine(line) || isNumberedListLine(line)) {
-      flushCurrent();
-      paragraphs.push(normalizeListItem(line));
+    if (inCodeBlock) {
+      codeLines.push(rawLine.replace(/\s+$/, ''));
       continue;
     }
 
-    if (isQuoteLine(line)) {
-      flushCurrent();
-      paragraphs.push(`> ${line.replace(/^>\s?/, '').trim()}`);
+    if (!trimmed) {
+      flushText();
       continue;
     }
 
-    current.push(line);
+    textLines.push(rawLine.replace(/\s+$/, ''));
   }
 
-  flushCurrent();
-  return paragraphs;
+  if (inCodeBlock) {
+    flushCode();
+  }
+  flushText();
+
+  return blocks;
 }
 
-function chunkParagraphs(paragraphs: string[]): string[][] {
-  const chunks: string[][] = [];
-  let current: string[] = [];
-  let currentLength = 0;
-
-  for (const paragraph of paragraphs) {
-    const nextLength = currentLength + paragraph.length;
-    if (
-      current.length > 0
-      && (current.length >= MAX_POST_PARAGRAPHS || nextLength > MAX_POST_CHARS)
-    ) {
-      chunks.push(current);
-      current = [];
-      currentLength = 0;
-    }
-
-    current.push(paragraph);
-    currentLength += paragraph.length;
+function splitLineByFit(line: string, fits: (value: string) => boolean): string[] {
+  if (fits(line)) {
+    return [line];
   }
 
-  if (current.length > 0) {
-    chunks.push(current);
+  const chunks: string[] = [];
+  let remaining = line;
+
+  while (remaining) {
+    if (fits(remaining)) {
+      chunks.push(remaining);
+      break;
+    }
+
+    let low = 1;
+    let high = remaining.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (fits(remaining.slice(0, mid))) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const slice = remaining.slice(0, low);
+    if (!slice) {
+      chunks.push(remaining.slice(0, 1));
+      remaining = remaining.slice(1).trimStart();
+      continue;
+    }
+
+    chunks.push(slice);
+    remaining = remaining.slice(slice.length).trimStart();
   }
 
   return chunks;
 }
 
-export function formatFeishuTextMessages(text: string): FeishuFormattedTextMessage[] {
+function splitTextBlock(block: MarkdownBlock & { kind: 'text' }, limit: number): MarkdownBlock[] {
+  const result: MarkdownBlock[] = [];
+  let current: string[] = [];
+
+  const fits = (lines: string[]) => cardByteLength([lines.join('\n')]) <= limit;
+
+  const flushCurrent = () => {
+    if (current.length === 0) {
+      return;
+    }
+    result.push({ kind: 'text', lines: current });
+    current = [];
+  };
+
+  for (const line of block.lines) {
+    if (current.length === 0) {
+      if (fits([line])) {
+        current = [line];
+      } else {
+        const split = splitLineByFit(line, value => fits([value]));
+        for (const chunk of split) {
+          result.push({ kind: 'text', lines: [chunk] });
+        }
+      }
+      continue;
+    }
+
+    if (fits([...current, line])) {
+      current.push(line);
+      continue;
+    }
+
+    flushCurrent();
+    if (fits([line])) {
+      current = [line];
+    } else {
+      const split = splitLineByFit(line, value => fits([value]));
+      for (const chunk of split) {
+        result.push({ kind: 'text', lines: [chunk] });
+      }
+    }
+  }
+
+  flushCurrent();
+  return result;
+}
+
+function splitCodeBlock(block: MarkdownBlock & { kind: 'code' }, limit: number): MarkdownBlock[] {
+  const result: MarkdownBlock[] = [];
+  let current: string[] = [];
+
+  const fits = (lines: string[]) => {
+    const markdown = buildMarkdownFromBlock({ kind: 'code', language: block.language, lines });
+    return cardByteLength([markdown]) <= limit;
+  };
+
+  const flushCurrent = () => {
+    if (current.length === 0) {
+      return;
+    }
+    result.push({ kind: 'code', language: block.language, lines: current });
+    current = [];
+  };
+
+  for (const line of block.lines) {
+    if (current.length === 0) {
+      if (fits([line])) {
+        current = [line];
+      } else {
+        const split = splitLineByFit(line, value => fits([value]));
+        for (const chunk of split) {
+          result.push({ kind: 'code', language: block.language, lines: [chunk] });
+        }
+      }
+      continue;
+    }
+
+    if (fits([...current, line])) {
+      current.push(line);
+      continue;
+    }
+
+    flushCurrent();
+    if (fits([line])) {
+      current = [line];
+    } else {
+      const split = splitLineByFit(line, value => fits([value]));
+      for (const chunk of split) {
+        result.push({ kind: 'code', language: block.language, lines: [chunk] });
+      }
+    }
+  }
+
+  flushCurrent();
+  return result;
+}
+
+function ensureBlockFits(block: MarkdownBlock, limit: number): MarkdownBlock[] {
+  const markdown = buildMarkdownFromBlock(block);
+  if (cardByteLength([markdown]) <= limit) {
+    return [block];
+  }
+
+  if (block.kind === 'code') {
+    return splitCodeBlock(block, limit);
+  }
+
+  return splitTextBlock(block, limit);
+}
+
+export function formatFeishuMarkdownCards(text: string): FeishuFormattedCardMessage[] {
   const normalized = normalizeInput(text);
   if (!normalized) {
     return [];
   }
 
-  if (CODE_FENCE_PATTERN.test(normalized)) {
-    return [buildTextMessage(normalized)];
+  const blocks = splitMarkdownBlocks(normalized)
+    .flatMap(block => ensureBlockFits(block, FEISHU_CARD_PAYLOAD_LIMIT_BYTES));
+
+  const cards: FeishuFormattedCardMessage[] = [];
+  let currentElements: string[] = [];
+
+  const flushCurrent = () => {
+    if (currentElements.length === 0) {
+      return;
+    }
+    cards.push({
+      card: buildMarkdownCard(currentElements),
+      byteLength: cardByteLength(currentElements),
+    });
+    currentElements = [];
+  };
+
+  for (const block of blocks) {
+    const markdown = buildMarkdownFromBlock(block);
+    if (currentElements.length === 0) {
+      currentElements = [markdown];
+      continue;
+    }
+
+    const nextElements = [...currentElements, markdown];
+    if (cardByteLength(nextElements) > FEISHU_CARD_PAYLOAD_LIMIT_BYTES) {
+      flushCurrent();
+      currentElements = [markdown];
+      continue;
+    }
+
+    currentElements = nextElements;
   }
 
-  const paragraphs = collectParagraphs(normalized);
-  if (paragraphs.length === 0) {
-    return [buildTextMessage(normalized)];
+  flushCurrent();
+  return cards;
+}
+
+export function buildFeishuMarkdownCardPayload(content: string, title?: string): Record<string, unknown> {
+  return buildMarkdownCard([content], title);
+}
+
+export function buildFeishuFileSummaryCardPayload(options: {
+  title: string;
+  intro: string;
+  files: string[];
+  note?: string;
+}): Record<string, unknown> {
+  const lines = [
+    options.intro,
+    '',
+    '文件列表：',
+    ...options.files.map(file => `- ${file}`),
+  ];
+
+  if (options.note) {
+    lines.push('', options.note);
   }
 
-  return chunkParagraphs(paragraphs).map(buildPostMessage);
+  return buildMarkdownCard([lines.join('\n')], options.title);
 }

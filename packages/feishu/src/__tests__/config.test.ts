@@ -23,8 +23,20 @@ describe('readFeishuConfig', () => {
     expect(config.feishuAppSecret).toBe('test-secret');
     expect(config.feishuBaseUrl).toBe('https://example.invalid');
     expect(config.feishuModelSelectionTimeoutMs).toBe(10_000);
+    expect(config.feishuAuthorizedOpenIds).toEqual([]);
     expect('feishuPort' in config).toBe(false);
     expect(config.agentTimeoutMs).toBeGreaterThan(0);
+  });
+
+  it('parses authorized open id allowlists from CSV', () => {
+    const config = readFeishuConfig({
+      ...process.env,
+      FEISHU_APP_ID: 'cli_test_app_id',
+      FEISHU_APP_SECRET: 'test-secret',
+      FEISHU_AUTHORIZED_OPEN_IDS: 'ou_admin_1, ou_admin_2,',
+    });
+
+    expect(config.feishuAuthorizedOpenIds).toEqual(['ou_admin_1', 'ou_admin_2']);
   });
 
   it('allows overriding the model auto-selection timeout', () => {
@@ -73,6 +85,7 @@ describe('readFeishuConfig', () => {
       feishuAppId: 'test-app-id',
       feishuAppSecret: 'test-secret',
       feishuBaseUrl: 'https://open.feishu.cn',
+      feishuAuthorizedOpenIds: [],
     }, {
       createConnection: () => ({
         start: vi.fn(async () => undefined),
@@ -82,6 +95,7 @@ describe('readFeishuConfig', () => {
 
     expect(process.env['STATE_FILE']).toBe('/tmp/feishu-explicit-state.json');
     expect(process.env['ARTIFACTS_BASE_DIR']).toBe('/tmp/feishu-explicit-artifacts');
+    expect(process.env['AGENT_CWD']).toBe('/tmp/feishu-workspace');
     expect(process.env['CLAUDE_CWD']).toBe('/tmp/feishu-workspace');
     expect(process.env['CLAUDE_BIN']).toBe('/tmp/bin/claude');
     expect(process.env['CODEX_BIN']).toBe('/tmp/bin/codex');
@@ -106,6 +120,7 @@ describe('startup entry', () => {
       feishuAppId: 'test-app-id',
       feishuAppSecret: 'test-secret',
       feishuBaseUrl: 'https://open.feishu.cn',
+      feishuAuthorizedOpenIds: [],
     }, {
       createConnection: () => ({
         start: vi.fn(async () => undefined),
@@ -136,6 +151,7 @@ describe('startup entry', () => {
       feishuAppId: 'test-app-id',
       feishuAppSecret: 'test-secret',
       feishuBaseUrl: 'https://open.feishu.cn',
+      feishuAuthorizedOpenIds: [],
     }, {
       createConnection: () => connection,
     });

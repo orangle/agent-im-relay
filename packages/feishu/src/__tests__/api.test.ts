@@ -26,10 +26,12 @@ function testConfig() {
     artifactMaxSizeBytes: 8 * 1024 * 1024,
     claudeBin: '/opt/homebrew/bin/claude',
     codexBin: '/opt/homebrew/bin/codex',
+    opencodeBin: '/opt/homebrew/bin/opencode',
     feishuAppId: 'app-id',
     feishuAppSecret: 'app-secret',
     feishuBaseUrl: 'https://open.feishu.cn',
-    feishuPort: 3001,
+    feishuModelSelectionTimeoutMs: 10_000,
+    feishuAuthorizedOpenIds: [],
   };
 }
 

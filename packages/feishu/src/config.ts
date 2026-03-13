@@ -16,6 +16,18 @@ function optionalEnv(env: NodeJS.ProcessEnv, key: string): string | undefined {
   return env[key]?.trim() || undefined;
 }
 
+function csvEnv(env: NodeJS.ProcessEnv, key: string): string[] {
+  const raw = env[key]?.trim();
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
 function numberEnv(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   const raw = env[key]?.trim();
   if (!raw) {
@@ -46,6 +58,7 @@ export interface FeishuConfig extends CoreConfig {
   feishuVerificationToken?: string;
   feishuBaseUrl: string;
   feishuModelSelectionTimeoutMs: number;
+  feishuAuthorizedOpenIds: string[];
 }
 
 export function resolveFeishuSessionChatStateFile(stateFile: string): string {
@@ -67,6 +80,7 @@ export function readFeishuConfig(env: NodeJS.ProcessEnv = process.env): FeishuCo
     feishuVerificationToken: optionalEnv(env, 'FEISHU_VERIFICATION_TOKEN'),
     feishuBaseUrl: optionalEnv(env, 'FEISHU_BASE_URL') || 'https://open.feishu.cn',
     feishuModelSelectionTimeoutMs: resolveFeishuModelSelectionTimeoutMs(env),
+    feishuAuthorizedOpenIds: csvEnv(env, 'FEISHU_AUTHORIZED_OPEN_IDS'),
   };
 }
 
@@ -78,4 +92,5 @@ export function applyFeishuConfigEnvironment(config: FeishuConfig): void {
   setOptionalEnv('FEISHU_VERIFICATION_TOKEN', config.feishuVerificationToken);
   process.env['FEISHU_BASE_URL'] = config.feishuBaseUrl;
   process.env['FEISHU_MODEL_SELECTION_TIMEOUT_MS'] = String(config.feishuModelSelectionTimeoutMs);
+  setOptionalEnv('FEISHU_AUTHORIZED_OPEN_IDS', config.feishuAuthorizedOpenIds.join(','));
 }

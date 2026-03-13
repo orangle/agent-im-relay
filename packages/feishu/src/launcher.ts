@@ -1,5 +1,5 @@
 import type { AgentMode } from '@agent-im-relay/core';
-import { formatFeishuTextMessages } from './formatting.js';
+import { formatFeishuMarkdownCards } from './formatting.js';
 import { buildFeishuSessionChatRecord, rememberFeishuSessionChat } from './session-chat.js';
 import { buildFeishuSessionChatName } from './naming.js';
 import { describeError } from './utils.js';
@@ -22,6 +22,7 @@ export type FeishuLauncherClient = {
     msgType: 'text' | 'post' | 'interactive' | 'file' | 'share_chat';
     content: string;
   }): Promise<string | undefined>;
+  sendCard(receiveId: string, card: Record<string, unknown>, receiveIdType?: 'chat_id' | 'open_id' | 'union_id' | 'email' | 'user_id'): Promise<string | undefined>;
 };
 
 export type FeishuLaunchResult = {
@@ -45,13 +46,12 @@ async function sendFormattedFeishuText(options: {
 }): Promise<string | undefined> {
   let lastMessageId: string | undefined;
 
-  for (const message of formatFeishuTextMessages(options.text)) {
-    lastMessageId = await options.client.sendMessage({
-      receiveId: options.receiveId,
-      receiveIdType: options.receiveIdType,
-      msgType: message.msgType,
-      content: message.content,
-    });
+  for (const card of formatFeishuMarkdownCards(options.text)) {
+    lastMessageId = await options.client.sendCard(
+      options.receiveId,
+      card.card,
+      options.receiveIdType,
+    );
   }
 
   return lastMessageId;

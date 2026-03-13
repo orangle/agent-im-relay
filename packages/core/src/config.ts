@@ -41,7 +41,7 @@ export function readCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
 
   return {
     agentTimeoutMs: numberEnv(env, 'AGENT_TIMEOUT_MS', 10 * 60 * 1000),
-    claudeCwd: optionalEnv(env, 'CLAUDE_CWD') || process.cwd(),
+    claudeCwd: optionalEnv(env, 'AGENT_CWD') || optionalEnv(env, 'CLAUDE_CWD') || process.cwd(),
     stateFile: optionalEnv(env, 'STATE_FILE') || relayPaths.stateFile,
     artifactsBaseDir: optionalEnv(env, 'ARTIFACTS_BASE_DIR') || relayPaths.artifactsDir,
     artifactRetentionDays: numberEnv(env, 'ARTIFACT_RETENTION_DAYS', 14),
@@ -55,6 +55,7 @@ export function readCoreConfig(env: NodeJS.ProcessEnv = process.env): CoreConfig
 export function applyCoreConfigEnvironment(config: CoreConfig): void {
   setNumericEnv('AGENT_TIMEOUT_MS', config.agentTimeoutMs);
   delete process.env['CLAUDE_MODEL'];
+  process.env['AGENT_CWD'] = config.claudeCwd;
   process.env['CLAUDE_CWD'] = config.claudeCwd;
   process.env['STATE_FILE'] = config.stateFile;
   process.env['ARTIFACTS_BASE_DIR'] = config.artifactsBaseDir;

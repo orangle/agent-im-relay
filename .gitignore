@@ -6,3 +6,5 @@ data/
 .agent-inbox/
 .worktrees/
 .DS_Store
+.trellis/*
+.agents/*

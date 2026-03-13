@@ -170,7 +170,7 @@ function button(
   context: FeishuCardContext,
   action: string,
   extra: Record<string, unknown> = {},
-  type?: 'primary' | 'default',
+  type?: 'primary' | 'default' | 'danger',
 ): Record<string, unknown> {
   return {
     tag: 'button',
@@ -344,6 +344,55 @@ export function buildFeishuSessionAnchorCardPayload(
         },
         button('Fallback Controls', context, 'control-panel'),
         button('Interrupt', context, 'interrupt'),
+      ],
+    },
+  };
+}
+
+export function buildFeishuHelpCardPayload(
+  conversationId: string,
+  context: FeishuCardContext,
+): Record<string, unknown> {
+  return {
+    schema: '2.0',
+    header: {
+      title: plainText('命令中心'),
+      template: 'blue',
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: '选择一个命令，或输入 Session ID 直接恢复会话。',
+        },
+        {
+          tag: 'hr',
+        },
+        {
+          tag: 'markdown',
+          content: '**快捷命令**',
+        },
+        button('/help', context, 'command', { command: 'help' }, 'primary'),
+        button('/status', context, 'command', { command: 'status' }, 'default'),
+        button('/done', context, 'command', { command: 'done' }, 'danger'),
+        button('控制面板', context, 'control-panel', {}, 'default'),
+        {
+          tag: 'hr',
+        },
+        {
+          tag: 'markdown',
+          content: '**恢复会话**',
+        },
+        {
+          tag: 'input',
+          name: 'sessionId',
+          placeholder: plainText('Session ID，例如 session-123'),
+        },
+        button('恢复会话', context, 'resume', {}, 'primary'),
+        {
+          tag: 'markdown',
+          content: `Conversation \`${conversationId}\``,
+        },
       ],
     },
   };
