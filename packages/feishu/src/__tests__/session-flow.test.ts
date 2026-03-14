@@ -31,6 +31,8 @@ describe('Feishu session flow', () => {
       sendCard: vi.fn(async () => 'card-1'),
       sendText: vi.fn(async () => undefined),
       updateCard: vi.fn(async () => undefined),
+      addReaction: vi.fn(async (messageId: string, emojiType: string) => `${messageId}:${emojiType}`),
+      deleteReaction: vi.fn(async () => undefined),
       uploadFile: vi.fn(async () => undefined),
     };
 
@@ -49,10 +51,16 @@ describe('Feishu session flow', () => {
 
     expect(transport.sendCard).toHaveBeenCalledOnce();
     expect(transport.sendText).toHaveBeenCalledOnce();
+    expect(transport.addReaction).toHaveBeenNthCalledWith(1, 'message-1', 'OK');
+    expect(transport.deleteReaction).toHaveBeenCalledWith('message-1', 'message-1:OK');
+    expect(transport.addReaction).toHaveBeenNthCalledWith(2, 'message-1', 'DONE');
     expect(transport.sendText).toHaveBeenCalledWith({
       chatId: 'session-chat-1',
       replyToMessageId: 'message-1',
     }, 'final answer');
+    expect(runtimeMocks.runFeishuConversation).toHaveBeenCalledWith(expect.objectContaining({
+      streamingCardMessageId: 'card-1',
+    }));
   });
 
   it('emits the busy notice only once for the same source message', async () => {
@@ -62,6 +70,8 @@ describe('Feishu session flow', () => {
       sendCard: vi.fn(async () => 'card-1'),
       sendText: vi.fn(async () => undefined),
       updateCard: vi.fn(async () => undefined),
+      addReaction: vi.fn(async (messageId: string, emojiType: string) => `${messageId}:${emojiType}`),
+      deleteReaction: vi.fn(async () => undefined),
       uploadFile: vi.fn(async () => undefined),
     };
     const options = {
@@ -95,6 +105,8 @@ describe('Feishu session flow', () => {
       sendCard: vi.fn(async () => 'card-1'),
       sendText: vi.fn(async () => undefined),
       updateCard: vi.fn(async () => undefined),
+      addReaction: vi.fn(async (messageId: string, emojiType: string) => `${messageId}:${emojiType}`),
+      deleteReaction: vi.fn(async () => undefined),
       uploadFile: vi.fn(async () => undefined),
     };
     const options = {
@@ -115,5 +127,8 @@ describe('Feishu session flow', () => {
 
     expect(transport.sendText).toHaveBeenCalledOnce();
     expect(transport.sendText).toHaveBeenCalledWith(options.target, '❌ failed');
+    expect(transport.addReaction).toHaveBeenNthCalledWith(1, 'message-error-1', 'OK');
+    expect(transport.deleteReaction).toHaveBeenCalledWith('message-error-1', 'message-error-1:OK');
+    expect(transport.addReaction).toHaveBeenNthCalledWith(2, 'message-error-1', 'ERROR');
   });
 });

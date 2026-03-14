@@ -74,6 +74,14 @@ export function createFeishuClient(
     msgType: FeishuMessageType;
     content: string;
   }): Promise<string | undefined>;
+  addMessageReaction(options: {
+    messageId: string;
+    emojiType: string;
+  }): Promise<string | undefined>;
+  deleteMessageReaction(options: {
+    messageId: string;
+    reactionId: string;
+  }): Promise<void>;
   sendCard(receiveId: string, card: Record<string, unknown>, receiveIdType?: FeishuReceiveIdType): Promise<string | undefined>;
   updateCardMessage(messageId: string, card: Record<string, unknown>): Promise<void>;
   uploadFile(options: { filePath: string; fileName: string }): Promise<string>;
@@ -273,6 +281,55 @@ export function createFeishuClient(
     });
   }
 
+  async function addMessageReaction(options: {
+    messageId: string;
+    emojiType: string;
+  }): Promise<string | undefined> {
+    const response = await authorizedFetch(
+      buildUrl(config.feishuBaseUrl, `/open-apis/im/v1/messages/${options.messageId}/reactions`).toString(),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({
+          reaction_type: {
+            emoji_type: options.emojiType,
+          },
+        }),
+      },
+    );
+    const payload = await readJsonResponse<{
+      code?: number;
+      msg?: string;
+      data?: {
+        reaction_id?: string;
+      };
+    }>(response);
+    assertFeishuSuccess(response, payload, 'Feishu add message reaction');
+    return payload.data?.reaction_id;
+  }
+
+  async function deleteMessageReaction(options: {
+    messageId: string;
+    reactionId: string;
+  }): Promise<void> {
+    const response = await authorizedFetch(
+      buildUrl(
+        config.feishuBaseUrl,
+        `/open-apis/im/v1/messages/${options.messageId}/reactions/${options.reactionId}`,
+      ).toString(),
+      {
+        method: 'DELETE',
+      },
+    );
+    const payload = await readJsonResponse<{
+      code?: number;
+      msg?: string;
+    }>(response);
+    assertFeishuSuccess(response, payload, 'Feishu delete message reaction');
+  }
+
   async function updateCardMessage(messageId: string, card: Record<string, unknown>): Promise<void> {
     const response = await authorizedFetch(
       buildUrl(config.feishuBaseUrl, `/open-apis/im/v1/messages/${messageId}`).toString(),
@@ -378,6 +435,8 @@ export function createFeishuClient(
     createSessionChat,
     sendMessage,
     replyMessage,
+    addMessageReaction,
+    deleteMessageReaction,
     sendCard,
     updateCardMessage,
     uploadFile,

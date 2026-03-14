@@ -29,6 +29,7 @@ import {
 } from '@agent-im-relay/core';
 import {
   buildFeishuBackendSelectionCardPayload,
+  buildFeishuInterruptCardPayload,
   buildFeishuModelSelectionCardPayload,
   buildFeishuSessionControlPanelPayload,
   buildModelSelectionCard,
@@ -49,6 +50,7 @@ import { getFeishuSessionChat } from './session-chat.js';
 const FILE_REQUEST_PATTERN = /(?:发送|生成|导出|保存|下载|提供|给我|发我|创建|输出).{0,16}(?:文件|附件|文档|表格|excel|csv|pdf|word|ppt|压缩包)/i;
 const FILE_EXTENSION_PATTERN = /\.(?:xlsx|xls|csv|pdf|docx?|pptx?|zip|rar|7z|md|txt)\b/i;
 const FILE_NEGATION_PATTERN = /不(?:要|用|需要|必|想).{0,8}(?:文件|附件|文档|表格|excel|csv|pdf|word|ppt|压缩包)/i;
+const STREAMING_CARD_UPDATE_INTERVAL_MS = 300;
 
 function shouldSendArtifactsForPrompt(prompt: string): boolean {
   const trimmed = prompt.trim();
@@ -90,6 +92,8 @@ export type FeishuRuntimeTransport = {
   sendText(target: FeishuTarget, text: string): Promise<void>;
   sendCard(target: FeishuTarget, card: Record<string, unknown>): Promise<string | undefined>;
   updateCard(target: FeishuTarget, messageId: string, card: Record<string, unknown>): Promise<void>;
+  addReaction?(messageId: string, emojiType: string): Promise<string | undefined>;
+  deleteReaction?(messageId: string, reactionId: string): Promise<void>;
   uploadFile(target: FeishuTarget, filePath: string): Promise<void>;
 };
 
@@ -567,19 +571,169 @@ export type FeishuConversationLifecycle = {
   onFinalOutput?(output: string): Promise<void>;
 };
 
+type StreamingRenderSegment =
+  | { kind: 'text'; value: string }
+  | { kind: 'note'; value: string };
+
+function tryParseToolSummary(summary: string): { tool: string; input?: Record<string, unknown> } | null {
+  const match = /^running\s+([A-Za-z]+)(?:\s+(.+))?$/.exec(summary.trim());
+  if (!match) {
+    return null;
+  }
+
+  const tool = match[1];
+  const rawInput = match[2]?.trim();
+  if (!rawInput) {
+    return { tool };
+  }
+
+  try {
+    const parsed = JSON.parse(rawInput) as unknown;
+    return parsed && typeof parsed === 'object'
+      ? { tool, input: parsed as Record<string, unknown> }
+      : { tool };
+  } catch {
+    return { tool };
+  }
+}
+
+function truncateDisplayText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function formatCriticalToolMessage(summary: string): string | undefined {
+  const parsed = tryParseToolSummary(summary);
+  if (!parsed) {
+    return undefined;
+  }
+
+  if (parsed.tool === 'Write' || parsed.tool === 'Edit' || parsed.tool === 'MultiEdit') {
+    const filePath = typeof parsed.input?.file_path === 'string' ? parsed.input.file_path : undefined;
+    return filePath ? `⚙️ 准备修改文件：${truncateDisplayText(filePath, 120)}` : `⚙️ 准备执行 ${parsed.tool}`;
+  }
+
+  if (parsed.tool === 'WebSearch') {
+    const query = typeof parsed.input?.query === 'string' ? parsed.input.query : undefined;
+    return query ? `🌐 准备搜索：${truncateDisplayText(query, 120)}` : '🌐 准备搜索内容';
+  }
+
+  if (parsed.tool === 'WebFetch') {
+    const url = typeof parsed.input?.url === 'string' ? parsed.input.url : undefined;
+    return url ? `🌐 准备访问：${truncateDisplayText(url, 120)}` : '🌐 准备获取网页';
+  }
+
+  if (parsed.tool === 'Bash') {
+    const command = typeof parsed.input?.command === 'string' ? parsed.input.command : undefined;
+    if (!command) {
+      return undefined;
+    }
+
+    const isDangerous = [
+      /\brm\s+-rf?\b/i,
+      /\bgit\s+push\b/i,
+      /\bnpm\s+publish\b/i,
+      /\bsudo\b/i,
+      /\bdd\s+if=/i,
+      /\/dev\/sd[a-z]/i,
+    ].some(pattern => pattern.test(command));
+
+    return isDangerous
+      ? `⚠️ 准备执行命令：${truncateDisplayText(command, 120)}`
+      : undefined;
+  }
+
+  return undefined;
+}
+
+function appendStreamingSegment(segments: StreamingRenderSegment[], segment: StreamingRenderSegment): void {
+  if (!segment.value) {
+    return;
+  }
+
+  const last = segments.at(-1);
+  if (segment.kind === 'text' && last?.kind === 'text') {
+    last.value += segment.value;
+    return;
+  }
+
+  segments.push(segment);
+}
+
+function renderStreamingSegments(segments: StreamingRenderSegment[]): string {
+  let output = '';
+
+  for (const segment of segments) {
+    if (segment.kind === 'text') {
+      output += segment.value;
+      continue;
+    }
+
+    const prefix = output.trim().length > 0 ? '\n\n' : '';
+    output = `${output.trimEnd()}${prefix}${segment.value}\n\n`;
+  }
+
+  return output.trim();
+}
+
+function buildStreamingOutput(finalText: string, chunks: string[], renderedSegments: StreamingRenderSegment[]): string {
+  return finalText.trim() || chunks.join('').trim() || renderStreamingSegments(renderedSegments);
+}
+
 async function streamAgentToFeishu(
   transport: FeishuRuntimeTransport,
+  conversationId: string,
   target: FeishuTarget,
   events: AsyncIterable<AgentStreamEvent>,
   showEnvironment: boolean,
+  prompt: string,
+  mode: 'code' | 'ask',
+  streamingCardMessageId?: string,
   lifecycle?: FeishuConversationLifecycle,
 ): Promise<void> {
+  const cardContext = buildFeishuCardContext(conversationId, target, { prompt, mode });
+  const hasStreamingCard = typeof streamingCardMessageId === 'string' && streamingCardMessageId.length > 0;
   let finalText = '';
   const chunks: string[] = [];
+  const renderedSegments: StreamingRenderSegment[] = [];
+  let lastCardFlushAt = 0;
+
+  const updateStreamingCard = async (
+    status: 'running' | 'done' | 'error',
+    force = false,
+    contentOverride?: string,
+  ): Promise<void> => {
+    if (!hasStreamingCard || !streamingCardMessageId) {
+      return;
+    }
+
+    if (!force && Date.now() - lastCardFlushAt < STREAMING_CARD_UPDATE_INTERVAL_MS) {
+      return;
+    }
+
+    try {
+      await transport.updateCard(
+        target,
+        streamingCardMessageId,
+        buildFeishuInterruptCardPayload(cardContext, {
+          prompt,
+          content: contentOverride ?? renderStreamingSegments(renderedSegments),
+          status,
+          showCursor: status === 'running',
+        }),
+      );
+      lastCardFlushAt = Date.now();
+    } catch {
+      // Ignore card refresh failures so the main conversation can continue.
+    }
+  };
 
   for await (const event of events) {
     if (event.type === 'environment') {
-      if (!showEnvironment) {
+      if (!showEnvironment || hasStreamingCard) {
         continue;
       }
       await transport.sendText(target, formatEnvironmentSummary(event));
@@ -588,10 +742,54 @@ async function streamAgentToFeishu(
 
     if (event.type === 'text') {
       chunks.push(event.delta);
+      appendStreamingSegment(renderedSegments, {
+        kind: 'text',
+        value: event.delta,
+      });
+      await updateStreamingCard('running');
+      continue;
+    }
+
+    if (event.type === 'tool') {
+      const toolMessage = formatCriticalToolMessage(event.summary);
+      if (toolMessage) {
+        appendStreamingSegment(renderedSegments, {
+          kind: 'note',
+          value: toolMessage,
+        });
+        await updateStreamingCard('running', true);
+      }
+      continue;
+    }
+
+    if (event.type === 'status') {
+      if (event.status.startsWith('cwd:')) {
+        continue;
+      }
+
+      if (!hasStreamingCard && !chunks.length) {
+        continue;
+      }
+
+      if (hasStreamingCard && renderedSegments.length === 0) {
+        appendStreamingSegment(renderedSegments, {
+          kind: 'note',
+          value: event.status,
+        });
+        await updateStreamingCard('running');
+      }
       continue;
     }
 
     if (event.type === 'error') {
+      if (hasStreamingCard) {
+        appendStreamingSegment(renderedSegments, {
+          kind: 'note',
+          value: `❌ ${event.error}`,
+        });
+        await updateStreamingCard('error', true);
+      }
+
       if (lifecycle?.onError) {
         await lifecycle.onError(`❌ ${event.error}`);
         return;
@@ -602,11 +800,14 @@ async function streamAgentToFeishu(
     }
 
     if (event.type === 'done') {
-      finalText = event.result;
+      finalText = buildStreamingOutput(event.result, chunks, renderedSegments);
+      if (hasStreamingCard) {
+        await updateStreamingCard('done', true, '已完成，完整结果见下方消息。');
+      }
     }
   }
 
-  const output = finalText || chunks.join('').trim();
+  const output = buildStreamingOutput(finalText, chunks, renderedSegments);
   if (output) {
     if (lifecycle?.onFinalOutput) {
       await lifecycle.onFinalOutput(output);
@@ -630,6 +831,7 @@ export async function runFeishuConversation(options: {
   persistState?: () => Promise<void>;
   lifecycle?: FeishuConversationLifecycle;
   modelSelectionTimeoutMs?: number;
+  streamingCardMessageId?: string;
 }): Promise<{ kind: 'blocked' | 'started' | 'busy' | 'error' }> {
   const gate = await beginFeishuConversationRun({
     conversationId: options.conversationId,
@@ -740,7 +942,17 @@ export async function runFeishuConversation(options: {
     attachments: mergedAttachments,
     attachmentFetchImpl: options.attachmentFetchImpl,
     render: ({ target, showEnvironment }, events) =>
-      streamAgentToFeishu(options.transport, target, events, showEnvironment, options.lifecycle),
+      streamAgentToFeishu(
+        options.transport,
+        options.conversationId,
+        target,
+        events,
+        showEnvironment,
+        options.prompt,
+        options.mode,
+        options.streamingCardMessageId,
+        options.lifecycle,
+      ),
     publishArtifacts,
   });
 
@@ -757,7 +969,17 @@ export async function runFeishuConversation(options: {
       attachments: mergedAttachments,
       attachmentFetchImpl: options.attachmentFetchImpl,
       render: ({ target, showEnvironment }, events) =>
-        streamAgentToFeishu(options.transport, target, events, showEnvironment, options.lifecycle),
+        streamAgentToFeishu(
+          options.transport,
+          options.conversationId,
+          target,
+          events,
+          showEnvironment,
+          options.prompt,
+          options.mode,
+          options.streamingCardMessageId,
+          options.lifecycle,
+        ),
       publishArtifacts,
     });
   }

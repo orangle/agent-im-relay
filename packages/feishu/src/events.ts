@@ -491,6 +491,20 @@ function createTransport(
     await client.updateCardMessage(messageId, card);
   }
 
+  async function addReaction(messageId: string, emojiType: string): Promise<string | undefined> {
+    return client.addMessageReaction({
+      messageId,
+      emojiType,
+    });
+  }
+
+  async function deleteReaction(messageId: string, reactionId: string): Promise<void> {
+    await client.deleteMessageReaction({
+      messageId,
+      reactionId,
+    });
+  }
+
   async function uploadFile(target: FeishuTarget, filePath: string): Promise<void> {
     const buffer = await readFileImpl(filePath);
     const fileKey = await client.uploadFileContent({
@@ -517,6 +531,8 @@ function createTransport(
     sendText,
     sendCard,
     updateCard,
+    addReaction,
+    deleteReaction,
     uploadFile,
   };
 }

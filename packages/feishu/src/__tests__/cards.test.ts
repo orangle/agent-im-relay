@@ -125,8 +125,13 @@ describe('Feishu cards', () => {
         tag: 'plain_text',
         content: 'Session Run',
       },
+      template: 'blue',
     });
     expect(collectButtonTexts(interrupt)).toEqual(['Interrupt']);
+    expect(interrupt.body.elements).toContainEqual({
+      tag: 'markdown',
+      content: '💭 **Thinking...**',
+    });
     expect(interrupt.body.elements).toContainEqual({
       tag: 'markdown',
       content: 'Stop the current run before sending a correction or a new direction.',

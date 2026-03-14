@@ -56,6 +56,13 @@ export interface FeishuCardContext {
   mode?: AgentMode;
 }
 
+export interface FeishuStreamingRunCardState {
+  prompt?: string;
+  content?: string;
+  status?: 'running' | 'done' | 'error';
+  showCursor?: boolean;
+}
+
 export const FEISHU_NON_SESSION_CONTROL_TEXT = 'This chat is not an agent session. Create or open a session chat first.';
 
 export function buildSessionAnchorCard(
@@ -163,6 +170,24 @@ function plainText(content: string): Record<string, unknown> {
     tag: 'plain_text',
     content,
   };
+}
+
+function truncateInlineText(content: string, maxLength: number): string {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function trimCardContent(content: string, maxLength: number): string {
+  const normalized = content.trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `...${normalized.slice(Math.max(0, normalized.length - maxLength + 3)).trimStart()}`;
 }
 
 function button(
@@ -294,17 +319,50 @@ export function buildFeishuSessionControlPanelPayload(
 
 export function buildFeishuInterruptCardPayload(
   context: FeishuCardContext,
+  state: FeishuStreamingRunCardState = {},
 ): Record<string, unknown> {
+  const status = state.status ?? 'running';
+  const prompt = truncateInlineText(state.prompt ?? context.prompt ?? '', 180);
+  const bodyContent = trimCardContent(state.content?.trim() || 'Stop the current run before sending a correction or a new direction.', 1600);
+  const displayContent = status === 'running' && state.showCursor
+    ? `${bodyContent}${bodyContent.endsWith('▍') ? '' : '▍'}`
+    : bodyContent;
+
   return {
     schema: '2.0',
     header: {
-      title: plainText('Session Run'),
+      title: plainText(
+        status === 'done'
+          ? 'Session Complete'
+          : status === 'error'
+            ? 'Session Error'
+            : 'Session Run',
+      ),
+      ...(status === 'done'
+        ? { template: 'green' }
+        : status === 'error'
+          ? { template: 'red' }
+          : { template: 'blue' }),
     },
     body: {
       elements: [
+        ...(prompt
+          ? [{
+              tag: 'markdown',
+              content: `> ${prompt}`,
+            }]
+          : []),
         {
           tag: 'markdown',
-          content: 'Stop the current run before sending a correction or a new direction.',
+          content: status === 'done'
+            ? '✅ **Done**'
+            : status === 'error'
+              ? '❌ **Error**'
+              : '💭 **Thinking...**',
+        },
+        {
+          tag: 'markdown',
+          content: displayContent,
         },
         button('Interrupt', context, 'interrupt', {}, 'primary'),
       ],

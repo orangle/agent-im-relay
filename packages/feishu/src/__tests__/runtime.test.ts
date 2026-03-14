@@ -135,6 +135,87 @@ describe('Feishu runtime', () => {
     expect(persistState).not.toHaveBeenCalled();
   });
 
+  it('updates the existing interrupt card with streaming text and critical tool hints', async () => {
+    conversationModels.set('conv-stream', 'sonnet');
+
+    coreMocks.runPlatformConversation.mockImplementationOnce(async (options) => {
+      await options.render(
+        {
+          target: options.target,
+          showEnvironment: true,
+        },
+        (async function* () {
+          yield {
+            type: 'environment',
+            environment: {
+              backend: 'claude',
+              mode: 'ask',
+              model: {},
+              cwd: { value: '/tmp/project', source: 'explicit' },
+              git: { isRepo: false },
+            },
+          } as const;
+          yield { type: 'text', delta: '用户想要更多的科技新闻。' } as const;
+          yield { type: 'tool', summary: 'running WebSearch {"query":"今日科技新闻"}' } as const;
+          yield { type: 'text', delta: '让我再抓取一些。' } as const;
+          yield { type: 'done', result: '最终答案' } as const;
+        })(),
+      );
+      return true;
+    });
+
+    const transport = {
+      sendText: vi.fn(async () => undefined),
+      sendCard: vi.fn(async () => undefined),
+      updateCard: vi.fn(async () => undefined),
+      uploadFile: vi.fn(async () => undefined),
+    };
+
+    await runFeishuConversation({
+      conversationId: 'conv-stream',
+      target: {
+        chatId: 'chat-1',
+        replyToMessageId: 'message-1',
+      },
+      prompt: '帮我找一些今日的科技新闻',
+      mode: 'ask',
+      transport,
+      defaultCwd: process.cwd(),
+      streamingCardMessageId: 'card-1',
+    });
+
+    expect(transport.sendText).toHaveBeenCalledWith({
+      chatId: 'chat-1',
+      replyToMessageId: 'message-1',
+    }, '最终答案');
+    expect(transport.sendText).not.toHaveBeenCalledWith(
+      {
+        chatId: 'chat-1',
+        replyToMessageId: 'message-1',
+      },
+      'Environment: backend=claude, mode=ask, cwd=/tmp/project',
+    );
+    expect(transport.updateCard).toHaveBeenCalled();
+    expect(transport.updateCard).toHaveBeenCalledWith(
+      {
+        chatId: 'chat-1',
+        replyToMessageId: 'message-1',
+      },
+      'card-1',
+      expect.objectContaining({
+        header: expect.objectContaining({
+          title: {
+            tag: 'plain_text',
+            content: 'Session Complete',
+          },
+        }),
+      }),
+    );
+    expect(JSON.stringify(transport.updateCard.mock.calls)).toContain('今日科技新闻');
+    expect(JSON.stringify(transport.updateCard.mock.calls)).toContain('用户想要更多的科技新闻');
+    expect(JSON.stringify(transport.updateCard.mock.calls)).toContain('已完成，完整结果见下方消息。');
+  });
+
   it('does not send environment summary on sticky-session resumes', async () => {
     conversationModels.set('conv-resume', 'sonnet');
 

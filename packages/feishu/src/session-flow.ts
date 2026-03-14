@@ -28,11 +28,30 @@ export async function runFeishuSessionFlow(options: {
     ? beginFeishuDispatch(options.sourceMessageId)
     : { dispatchId: randomUUID() };
 
-  await presentFeishuInterruptCard({
+  const sourceMessageId = options.sourceMessageId;
+  let runningReactionId: string | undefined;
+
+  const transitionReaction = async (emojiType: string): Promise<void> => {
+    if (!sourceMessageId) {
+      return;
+    }
+
+    if (runningReactionId && options.transport.deleteReaction) {
+      await options.transport.deleteReaction(sourceMessageId, runningReactionId).catch(() => {});
+      runningReactionId = undefined;
+    }
+
+    runningReactionId = await options.transport.addReaction?.(sourceMessageId, emojiType).catch(() => undefined);
+  };
+
+  await transitionReaction('OK');
+
+  const interruptCard = await presentFeishuInterruptCard({
     dispatchId: dispatch.dispatchId,
     conversationId: options.conversationId,
     target: options.target,
     transport: options.transport,
+    prompt: options.prompt,
   });
 
   const result = await runFeishuConversation({
@@ -46,8 +65,10 @@ export async function runFeishuSessionFlow(options: {
     attachments: options.attachments,
     attachmentFetchImpl: options.attachmentFetchImpl,
     persistState: options.persistState,
+    streamingCardMessageId: interruptCard.messageId,
     lifecycle: {
       onFinalOutput: async (output) => {
+        await transitionReaction('DONE');
         await presentFeishuFinalOutput({
           dispatchId: dispatch.dispatchId,
           output,
@@ -56,6 +77,7 @@ export async function runFeishuSessionFlow(options: {
         });
       },
       onError: async (error) => {
+        await transitionReaction('ERROR');
         await presentFeishuErrorOutput({
           dispatchId: dispatch.dispatchId,
           error,

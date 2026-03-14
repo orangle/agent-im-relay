@@ -27,13 +27,15 @@ describe('Feishu presentation', () => {
       conversationId: 'session-chat-1',
       target,
       transport,
-    })).resolves.toEqual({ kind: 'emitted' });
+      prompt: 'find the latest tech news',
+    })).resolves.toEqual({ kind: 'emitted', messageId: 'card-1' });
 
     await expect(presentFeishuInterruptCard({
       dispatchId: 'message-1',
       conversationId: 'session-chat-1',
       target,
       transport,
+      prompt: 'find the latest tech news',
     })).resolves.toEqual({ kind: 'skipped' });
 
     expect(transport.sendCard).toHaveBeenCalledOnce();

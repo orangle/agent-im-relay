@@ -16,6 +16,7 @@ export type FeishuPresentationTransport = {
 
 export type FeishuPresentationResult = {
   kind: 'emitted' | 'skipped';
+  messageId?: string;
 };
 
 function markDispatchMessage(
@@ -40,17 +41,27 @@ export async function presentFeishuInterruptCard(options: {
   conversationId: string;
   target: FeishuPresentationTarget;
   transport: FeishuPresentationTransport;
+  prompt?: string;
 }): Promise<FeishuPresentationResult> {
   const result = markDispatchMessage(options.dispatchId, 'interrupt-card');
   if (result.kind === 'skipped') {
     return result;
   }
 
-  await options.transport.sendCard(
+  const messageId = await options.transport.sendCard(
     options.target,
-    buildFeishuInterruptCardPayload(buildCardContext(options.conversationId, options.target)),
+    buildFeishuInterruptCardPayload(
+      buildCardContext(options.conversationId, options.target),
+      {
+        prompt: options.prompt,
+        content: 'Stop the current run before sending a correction or a new direction.',
+      },
+    ),
   );
-  return result;
+  return {
+    ...result,
+    messageId,
+  };
 }
 
 export async function presentFeishuBusyNotice(options: {
